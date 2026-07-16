@@ -1,0 +1,316 @@
+import AppKit
+import SwiftUI
+import WorkstateCore
+
+struct ReviewInboxPopover: View {
+    @ObservedObject var model: WorkstateViewModel
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.workstateSnapshotRendering) private var snapshotRendering
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+
+            Rectangle()
+                .fill(WorkstateTheme.separator.opacity(0.68))
+                .frame(height: 0.5)
+
+            if let review = model.selectedReview {
+                reviewPicker
+
+                Rectangle()
+                    .fill(WorkstateTheme.separator.opacity(0.56))
+                    .frame(height: 0.5)
+
+                if snapshotRendering {
+                    ReviewDetail(review: review, workspace: model.workspace)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 424, alignment: .top)
+                        .clipped()
+                } else {
+                    ScrollView {
+                        ReviewDetail(review: review, workspace: model.workspace)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 424)
+                    .layoutPriority(1)
+                    .scrollIndicators(.visible)
+                }
+
+                Rectangle()
+                    .fill(WorkstateTheme.separator.opacity(0.68))
+                    .frame(height: 0.5)
+
+                actions
+            } else {
+                ContentUnavailableView(
+                    "没有待确认内容",
+                    systemImage: "checkmark.circle",
+                    description: Text("客观进展会继续自动维护。")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .workstateGlassSurface(cornerRadius: 18)
+        .shadow(
+            color: WorkstateTheme.shadow.opacity(colorScheme == .dark ? 0.50 : 0.22),
+            radius: 30,
+            y: 12
+        )
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "bell.badge")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(WorkstateTheme.warning)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("待确认")
+                    .font(WorkstateTheme.headlineFont)
+                Text("仅包含歧义、冲突和项目结构变化")
+                    .font(WorkstateTheme.microFont)
+                    .foregroundStyle(WorkstateTheme.secondaryLabel)
+            }
+
+            Spacer(minLength: 8)
+
+            Text("\(model.pendingReviews.count)")
+                .font(WorkstateTheme.captionEmphasisFont.monospacedDigit())
+                .foregroundStyle(WorkstateTheme.warning)
+
+            Button(action: model.closeReviewInbox) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .help("关闭")
+        }
+        .padding(.horizontal, 15)
+        .frame(height: 62)
+    }
+
+    private var reviewPicker: some View {
+        HStack(spacing: 8) {
+            ForEach(model.pendingReviews.prefix(4)) { review in
+                Button {
+                    model.selectReview(review.id)
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(review.kind.color)
+                            .frame(width: 6, height: 6)
+                        Text(review.projectID.flatMap(model.workspace.project(id:))?.name ?? "未归类")
+                            .lineLimit(1)
+                    }
+                    .font(WorkstateTheme.captionFont)
+                    .foregroundStyle(
+                        model.selectedReview?.id == review.id
+                            ? WorkstateTheme.primaryLabel
+                            : WorkstateTheme.secondaryLabel
+                    )
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background {
+                        Capsule()
+                            .fill(
+                                model.selectedReview?.id == review.id
+                                    ? review.kind.color.opacity(0.14)
+                                    : WorkstateTheme.primaryLabel.opacity(0.04)
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(height: 48)
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Button("拒绝") {
+                model.resolveSelectedReview(as: .rejected)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(WorkstateTheme.danger)
+
+            Spacer(minLength: 8)
+
+            Button("稍后") {
+                model.resolveSelectedReview(as: .deferred)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(WorkstateTheme.secondaryLabel)
+
+            Button("确认更新") {
+                model.resolveSelectedReview(as: .confirmed)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(WorkstateTheme.activeState)
+        }
+        .font(WorkstateTheme.captionEmphasisFont)
+        .padding(.horizontal, 15)
+        .frame(height: 54)
+    }
+}
+
+private struct ReviewDetail: View {
+    let review: ReviewItem
+    let workspace: WorkspaceSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(review.kind.displayName)
+                    .font(WorkstateTheme.microFont)
+                    .foregroundStyle(review.kind.color)
+                Text(review.title)
+                    .font(WorkstateTheme.sectionTitleFont)
+                Text(review.summary)
+                    .font(WorkstateTheme.secondaryFont)
+                    .foregroundStyle(WorkstateTheme.secondaryLabel)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ReviewTextSection(title: "为什么需要确认", text: review.reason)
+
+            if !review.previousValue.isEmpty {
+                ReviewTextSection(title: "当前结论", text: review.previousValue)
+            }
+            if !review.proposedValue.isEmpty {
+                ReviewTextSection(title: "建议更新为", text: review.proposedValue, accent: review.kind.color)
+            }
+
+            if !review.proposedChanges.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("具体变化")
+                        .font(WorkstateTheme.captionEmphasisFont)
+                        .foregroundStyle(WorkstateTheme.secondaryLabel)
+                    ForEach(review.proposedChanges, id: \.self) { change in
+                        Label(change, systemImage: "arrow.right")
+                            .font(WorkstateTheme.captionFont)
+                    }
+                }
+            }
+
+            if !sources.isEmpty {
+                Rectangle()
+                    .fill(WorkstateTheme.separator.opacity(0.56))
+                    .frame(height: 0.5)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("对话证据")
+                        .font(WorkstateTheme.captionEmphasisFont)
+                        .foregroundStyle(WorkstateTheme.secondaryLabel)
+
+                    ForEach(sources) { source in
+                        ConversationEvidence(source: source)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+    }
+
+    private var sources: [SourceReference] {
+        let ids = Set(review.sourceIDs)
+        return workspace.sources.filter { ids.contains($0.id) }
+    }
+}
+
+private struct ReviewTextSection: View {
+    let title: String
+    let text: String
+    var accent: Color = WorkstateTheme.primaryLabel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(WorkstateTheme.captionEmphasisFont)
+                .foregroundStyle(WorkstateTheme.secondaryLabel)
+            Text(text)
+                .font(WorkstateTheme.secondaryFont)
+                .foregroundStyle(accent)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+struct ConversationEvidence: View {
+    let source: SourceReference
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(source.excerpt) { message in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(message.role == "user" ? "你" : "Codex")
+                        .font(WorkstateTheme.microFont)
+                        .foregroundStyle(
+                            message.role == "user"
+                                ? WorkstateTheme.activeState
+                                : WorkstateTheme.secondaryLabel
+                        )
+                    Text(message.text)
+                        .font(WorkstateTheme.captionFont)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(
+                            message.role == "user"
+                                ? WorkstateTheme.activeState.opacity(0.65)
+                                : WorkstateTheme.separator
+                        )
+                        .frame(width: 2)
+                }
+            }
+
+            if let url = sourceURL {
+                Link(destination: url) {
+                    Label("打开原始对话", systemImage: "arrow.up.forward.app")
+                        .font(WorkstateTheme.captionEmphasisFont)
+                }
+            }
+        }
+    }
+
+    private var sourceURL: URL? {
+        if !source.threadID.isEmpty {
+            return URL(string: "codex://threads/\(source.threadID)")
+        }
+        return source.locator.hasPrefix("/")
+            ? URL(fileURLWithPath: source.locator)
+            : URL(string: source.locator)
+    }
+}
+
+private extension ReviewKind {
+    var displayName: String {
+        switch self {
+        case .ambiguousRouting: "归属不明确"
+        case .candidateProject: "候选新项目"
+        case .projectStructure: "项目结构变化"
+        case .understandingConflict: "项目理解冲突"
+        case .decisionConflict: "决策冲突"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .ambiguousRouting: WorkstateTheme.warning
+        case .candidateProject: WorkstateTheme.activeState
+        case .projectStructure: WorkstateTheme.activeState
+        case .understandingConflict: WorkstateTheme.warning
+        case .decisionConflict: WorkstateTheme.danger
+        }
+    }
+}

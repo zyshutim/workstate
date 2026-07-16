@@ -1,0 +1,1854 @@
+{
+  "projects": [
+    {
+      "accent": "blue",
+      "context": {
+        "currentSummary": "多机位版本的播放、预览、选择与音视频来源已经完成统一，并成为后续视图复用的交互契约；当前处于等待后续回归与收尾的状态。",
+        "inScope": [
+          "模块 A 多机位轨道",
+          "模块 B 视频预览与 Matrix",
+          "模块 C 粗剪",
+          "跨模块播放焦点、选择与音视频来源"
+        ],
+        "outOfScope": [
+          "报告正文与项目页入口",
+          "素材图谱层级与导航",
+          "Storyboard 与 Agent 编排"
+        ],
+        "purpose": "让模块 A、B、C 在多机位场景下共享一致、可预测且彼此解耦的播放、预览与选择语义。",
+        "revisions": [
+          {
+            "changes": [
+              "建立统一 Bug 账本",
+              "把 A/B/C 联动作为一个状态系统"
+            ],
+            "id": "mc-revision-start",
+            "sourceIDs": [
+              "source-claude-multicam",
+              "source-codex-reframe-app"
+            ],
+            "status": "confirmed",
+            "summary": "确认问题跨模块，停止继续在局部路径打补丁。",
+            "timestamp": "2026-06-04T07:51:23.641Z",
+            "title": "从零散 Bug 转为统一状态审计"
+          },
+          {
+            "changes": [
+              "蓝框不再等同于选择",
+              "单击与双击拥有不同来源切换语义"
+            ],
+            "id": "mc-revision-focus",
+            "sourceIDs": [
+              "source-claude-multicam",
+              "source-spec-global"
+            ],
+            "status": "confirmed",
+            "summary": "蓝框、预览模式和播放状态由明确动作共同更新。",
+            "timestamp": "2026-06-05T03:51:23.641Z",
+            "title": "播放焦点模型确认"
+          },
+          {
+            "changes": [
+              "取消播放 Chunk 高亮跟随",
+              "视频源切换使用 syncAudio=false"
+            ],
+            "id": "mc-revision-decoupling",
+            "sourceIDs": [
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "summary": "播放不再强制改变选中集合，视频源也不再隐式同步音频源。",
+            "timestamp": "2026-06-05T16:51:23.641Z",
+            "title": "选择与来源彻底解耦"
+          },
+          {
+            "changes": [
+              "创建 Reframe · 报告交互关系",
+              "保留原会话作为共同来源"
+            ],
+            "id": "mc-revision-handoff",
+            "sourceIDs": [
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "summary": "报告正文交互不再继续记入多机位项目。",
+            "timestamp": "2026-06-06T07:51:23.641Z",
+            "title": "会话范围发生转移"
+          }
+        ],
+        "understanding": [
+          {
+            "id": "mc-understanding-focus",
+            "sourceIDs": [
+              "source-spec-global",
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "text": "蓝框表示模块 B 当前预览来源，只能属于模块 A 或 C，不表示选择。",
+            "updatedAt": "2026-06-05T03:51:23.641Z"
+          },
+          {
+            "id": "mc-understanding-selection",
+            "sourceIDs": [
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "text": "播放位置、focused Chunk、视频源与音频源是四类独立状态。",
+            "updatedAt": "2026-06-05T16:51:23.641Z"
+          },
+          {
+            "id": "mc-understanding-box",
+            "sourceIDs": [
+              "source-spec-a",
+              "source-spec-c",
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "text": "框选只改变选择集合，不应隐式移动 playhead。",
+            "updatedAt": "2026-06-06T01:51:23.641Z"
+          },
+          {
+            "id": "mc-understanding-contract",
+            "sourceIDs": [
+              "source-codex-reframe-app",
+              "source-claude-material"
+            ],
+            "status": "observed",
+            "text": "这套状态解耦已经成为素材图谱等后续模块复用多机位轨道时的基础交互契约。",
+            "updatedAt": "2026-06-18T07:48:38.820Z"
+          }
+        ]
+      },
+      "createdAt": "2026-06-04T07:51:23.641Z",
+      "events": [],
+      "graphPosition": {
+        "x": 250,
+        "y": 245
+      },
+      "id": "reframe-multicam",
+      "lastActivityAt": "2026-07-09T02:55:18.435Z",
+      "name": "Reframe · 多机位",
+      "sourceIDs": [
+        "source-claude-multicam",
+        "source-codex-reframe-app",
+        "source-spec-global",
+        "source-spec-a",
+        "source-spec-b",
+        "source-spec-c",
+        "source-reframe-repo"
+      ],
+      "status": "waiting",
+      "summary": "多机位版本的跨模块播放、预览与选择状态统一",
+      "tasks": [],
+      "updatedAt": "2026-07-10T09:10:03.000Z"
+    },
+    {
+      "accent": "amber",
+      "context": {
+        "currentSummary": "报告视图的主要视觉、正文选择、分段、目录与候选交互已进入正式前端，项目页的生成和进入状态也已补齐；生成过程仍缺少后端细粒度进度信息，当前停放。",
+        "inScope": [
+          "模块 A 报告视图与长文本阅读",
+          "Chunk 选择、划词、拖拽与候选操作",
+          "正文分段、目录和 Cluster 顺序",
+          "报告搜索、预览与模块 C 联动",
+          "项目页的报告生成、状态提示与进入入口"
+        ],
+        "outOfScope": [
+          "后端报告生成算法",
+          "处理进度的新增数值接口",
+          "多机位播放焦点",
+          "Storyboard 编排"
+        ],
+        "purpose": "把 AI 报告变成可阅读、可定位、可选择并能继续进入粗剪的素材理解入口，同时让项目页清楚表达报告是否可用。",
+        "revisions": [
+          {
+            "changes": [
+              "按真实页面结构统一报告视图的视觉与模块 B",
+              "保留正式前端架构，实验后选择性集成"
+            ],
+            "id": "report-revision-ui",
+            "sourceIDs": [
+              "source-codex-reframe-app",
+              "source-reframe-repo"
+            ],
+            "status": "confirmed",
+            "summary": "报告视图从单点样式修改扩展为完整前端视觉与交互改造。",
+            "timestamp": "2026-05-26T02:31:09.618Z",
+            "title": "报告视图形成正式视觉基线"
+          },
+          {
+            "changes": [
+              "加入叙述分段与自适应正文",
+              "改为 Chunk 级选择、划词和拖拽",
+              "目录随滚动同步当前章节"
+            ],
+            "id": "report-revision-interaction",
+            "sourceIDs": [
+              "source-codex-reframe-app",
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "summary": "报告正文从连续文本展示改造成可操作的 Chunk 叙述界面。",
+            "timestamp": "2026-06-05T09:30:34.120Z",
+            "title": "正文交互与结构改造完成"
+          },
+          {
+            "changes": [
+              "生成完成后的主按钮改为进入项目",
+              "报告状态并入项目处理提示",
+              "保留重新生成入口"
+            ],
+            "id": "report-revision-entry",
+            "sourceIDs": [
+              "source-codex-reframe-app"
+            ],
+            "status": "observed",
+            "summary": "项目页入口和报告状态已经按可进入项目的主路径重新组织。",
+            "timestamp": "2026-07-09T08:22:21.723Z",
+            "title": "项目页报告入口收束"
+          }
+        ],
+        "understanding": [
+          {
+            "id": "report-understanding-role",
+            "sourceIDs": [
+              "source-codex-reframe-app",
+              "source-spec-a"
+            ],
+            "status": "confirmed",
+            "text": "报告是模块 A 的素材理解视图，核心价值不是展示一份文档，而是让用户从语义内容定位和选择可剪素材。",
+            "updatedAt": "2026-05-21T02:36:23.451Z"
+          },
+          {
+            "id": "report-understanding-selection",
+            "sourceIDs": [
+              "source-codex-reframe-app",
+              "source-claude-multicam"
+            ],
+            "status": "confirmed",
+            "text": "正文交互以 Chunk 为最小状态单元，阅读选择、候选操作和拖入模块 C 必须共享明确的选中集合。",
+            "updatedAt": "2026-06-05T09:30:34.120Z"
+          },
+          {
+            "id": "report-understanding-paragraph",
+            "sourceIDs": [
+              "source-claude-multicam"
+            ],
+            "status": "observed",
+            "text": "句号可能位于下一 Chunk 开头；渲染分段时应归回上一段，并结合 Chunk 间距和来源变化判断段落边界。",
+            "updatedAt": "2026-06-05T09:30:34.120Z"
+          },
+          {
+            "id": "report-understanding-progress",
+            "sourceIDs": [
+              "source-codex-reframe-app"
+            ],
+            "status": "observed",
+            "text": "当前后端能提供处理阶段与报告是否存在，但没有报告生成过程的细粒度数值进度，因此项目页只能准确表达阶段，不能伪造百分比。",
+            "updatedAt": "2026-07-09T08:18:00.499Z"
+          }
+        ]
+      },
+      "createdAt": "2026-05-21T02:35:40.691Z",
+      "events": [
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [
+            "报告视图当时是独立路由，并非模块 A 内部组件切换",
+            "正式前端缺少统一组件系统，实验需要与现有结构隔离"
+          ],
+          "id": "report-project-start",
+          "kind": "projectStarted",
+          "loopStage": "reconstruction",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [
+              "src/views/ProjectReportPage.vue"
+            ],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [],
+          "sourceIDs": [
+            "source-codex-reframe-app",
+            "source-reframe-repo"
+          ],
+          "summary": "先从真实文档、Figma 和代码重建报告视图在产品中的位置，再开始正式前端实验。",
+          "tags": [
+            "模块 A",
+            "报告视图"
+          ],
+          "timestamp": "2026-05-21T02:35:40.691Z",
+          "title": "报告视图前端改造开始"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "源码提交"
+            ],
+            "stage": "integrated",
+            "verifiedAt": "2026-05-26T02:31:09.618Z"
+          },
+          "facts": [
+            "报告与多机位的模块 B 视觉和信息面板被对齐",
+            "实验结果选择性进入正式前端"
+          ],
+          "id": "report-ui-integrated",
+          "kind": "integrated",
+          "loopStage": "integration",
+          "operations": {
+            "branch": "dev-frontend",
+            "commit": "9cdcdd1",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [
+              "src/views/ProjectReportPage.vue",
+              "src/components/video/SimpleVideoPlayer.vue"
+            ],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "report-project-start"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-app",
+            "source-reframe-repo"
+          ],
+          "summary": "报告视图与模块 B 的主要视觉和布局调整形成第一版正式基线。",
+          "tags": [
+            "视觉基线",
+            "模块 B"
+          ],
+          "timestamp": "2026-05-26T02:31:09.618Z",
+          "title": "报告视图视觉基线进入正式前端"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [],
+          "id": "report-paragraph-start",
+          "kind": "taskStarted",
+          "loopStage": "audit",
+          "operations": {
+            "branch": "report-narrative-paragraphs",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [
+              "src/views/ProjectReportPage.vue"
+            ],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "report-ui-integrated"
+          ],
+          "sourceIDs": [
+            "source-claude-multicam",
+            "source-codex-reframe-app"
+          ],
+          "summary": "寻找无需后端计算、可直接用于前端渲染的段落信号，并重新整理正文选择与拖拽。",
+          "tags": [
+            "正文",
+            "Chunk 选择"
+          ],
+          "taskID": "task-report-paragraphs",
+          "timestamp": "2026-06-05T06:53:50.289Z",
+          "title": "报告正文结构与选择改造开始"
+        },
+        {
+          "decisions": [
+            {
+              "id": "report-paragraph-decision",
+              "rationale": "标点归属与来源变化共同决定可读段落。",
+              "sourceIDs": [
+                "source-claude-multicam"
+              ],
+              "status": "confirmed",
+              "text": "标点归属上一段结尾，不成为新段段首"
+            }
+          ],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [],
+          "id": "report-paragraph-model",
+          "kind": "decision",
+          "loopStage": "modeling",
+          "operations": {
+            "branch": "report-narrative-paragraphs",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [
+              "src/views/ProjectReportPage.vue"
+            ],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "report-paragraph-start"
+          ],
+          "sourceIDs": [
+            "source-claude-multicam"
+          ],
+          "summary": "后一句以句号开头，且 Chunk gap>1 或来源文件变化时分段。",
+          "tags": [
+            "分段模型"
+          ],
+          "taskID": "task-report-paragraphs",
+          "timestamp": "2026-06-05T08:47:46.090Z",
+          "title": "确认组合分段规则"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "vue-tsc",
+              "git diff --check"
+            ],
+            "stage": "checked",
+            "verifiedAt": "2026-06-05T09:25:53.313Z"
+          },
+          "facts": [
+            "正文宽度改为自适应",
+            "目录可随滚动同步章节",
+            "选择和拖拽改为 Chunk 状态"
+          ],
+          "id": "report-paragraph-preview",
+          "kind": "verification",
+          "loopStage": "verification",
+          "operations": {
+            "branch": "report-narrative-paragraphs",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [
+              "src/views/ProjectReportPage.vue"
+            ],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "report-paragraph-model"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-app",
+            "source-claude-multicam"
+          ],
+          "summary": "正文分段、选择、拖拽、目录和响应式宽度通过静态检查。",
+          "tags": [
+            "正文交互"
+          ],
+          "taskID": "task-report-paragraphs",
+          "timestamp": "2026-06-05T09:25:53.313Z",
+          "title": "报告正文改造通过检查"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "commit 已存在"
+            ],
+            "stage": "integrated",
+            "verifiedAt": "2026-06-05T09:30:34.120Z"
+          },
+          "facts": [],
+          "id": "report-interactions-integrated",
+          "kind": "integrated",
+          "loopStage": "integration",
+          "operations": {
+            "branch": "report-narrative-paragraphs",
+            "commit": "f2e2ab1",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [
+              "src/views/ProjectReportPage.vue"
+            ],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "report-ui-integrated",
+            "report-paragraph-preview"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-app",
+            "source-claude-multicam"
+          ],
+          "summary": "报告正文、Chunk 选择、候选操作和目录交互作为一组改造提交。",
+          "tags": [
+            "正文交互",
+            "集成"
+          ],
+          "taskID": "task-report-paragraphs",
+          "timestamp": "2026-06-05T09:30:34.120Z",
+          "title": "报告正文交互改造完成"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "项目页真实状态走查"
+            ],
+            "stage": "rendered",
+            "verifiedAt": "2026-07-09T08:22:21.723Z"
+          },
+          "facts": [
+            "报告存在时主操作明确进入项目",
+            "失败理解可基于现有数据生成报告",
+            "报告生成过程仍没有细粒度数值接口"
+          ],
+          "id": "report-project-entry-integrated",
+          "kind": "verification",
+          "loopStage": "verification",
+          "operations": {
+            "branch": "dev-frontend",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "report-interactions-integrated"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-app"
+          ],
+          "summary": "项目页的报告状态、重新生成与进入项目主路径完成收束。",
+          "tags": [
+            "项目页",
+            "报告状态"
+          ],
+          "taskID": "task-report-entry",
+          "timestamp": "2026-07-09T08:22:21.723Z",
+          "title": "报告生成与进入项目路径补齐"
+        }
+      ],
+      "graphPosition": {
+        "x": 655,
+        "y": 155
+      },
+      "id": "reframe-report",
+      "lastActivityAt": "2026-07-09T08:22:21.723Z",
+      "name": "Reframe · 报告交互",
+      "sourceIDs": [
+        "source-codex-reframe-app",
+        "source-claude-multicam",
+        "source-spec-a",
+        "source-reframe-repo"
+      ],
+      "status": "parked",
+      "summary": "报告视图、正文交互与项目页报告入口",
+      "tasks": [
+        {
+          "accent": "blue",
+          "branchedFromEventID": "report-project-start",
+          "completedAt": "2026-05-26T02:31:09.618Z",
+          "currentStage": "completed",
+          "id": "task-report-ui",
+          "mergedByEventID": "report-ui-integrated",
+          "objective": "在不改动产品主架构的前提下统一报告视图与模块 B 的正式视觉和布局。",
+          "sourceIDs": [
+            "source-codex-reframe-app",
+            "source-reframe-repo"
+          ],
+          "startedAt": "2026-05-21T02:35:40.691Z",
+          "status": "completed",
+          "tags": [
+            "模块 A",
+            "模块 B",
+            "正式前端"
+          ],
+          "title": "报告视图视觉与布局改造",
+          "updatedAt": "2026-05-26T02:31:09.618Z"
+        },
+        {
+          "accent": "amber",
+          "branchedFromEventID": "report-ui-integrated",
+          "completedAt": "2026-06-05T09:30:34.120Z",
+          "currentStage": "completed",
+          "id": "task-report-paragraphs",
+          "mergedByEventID": "report-interactions-integrated",
+          "objective": "让超大报告正文具备可读分段、Chunk 级选择、候选操作与粗剪拖拽。",
+          "sourceIDs": [
+            "source-codex-reframe-app",
+            "source-claude-multicam"
+          ],
+          "startedAt": "2026-06-05T06:53:50.289Z",
+          "status": "completed",
+          "tags": [
+            "模块 A",
+            "报告正文",
+            "Chunk 交互"
+          ],
+          "title": "报告正文结构与选择改造",
+          "updatedAt": "2026-06-05T09:30:34.120Z"
+        },
+        {
+          "accent": "green",
+          "branchedFromEventID": "report-interactions-integrated",
+          "completedAt": "2026-07-09T08:22:21.723Z",
+          "currentStage": "completed",
+          "id": "task-report-entry",
+          "mergedByEventID": "report-project-entry-integrated",
+          "objective": "让项目页准确表达报告是否可用，并提供无需理解成本的进入项目主操作。",
+          "sourceIDs": [
+            "source-codex-reframe-app"
+          ],
+          "startedAt": "2026-06-24T01:48:21.771Z",
+          "status": "completed",
+          "tags": [
+            "项目页",
+            "报告状态"
+          ],
+          "title": "项目页报告状态与入口",
+          "updatedAt": "2026-07-09T08:22:21.723Z"
+        }
+      ],
+      "updatedAt": "2026-07-10T09:10:03.000Z"
+    },
+    {
+      "accent": "green",
+      "context": {
+        "currentSummary": "素材图谱作为模块 A 的素材库视图，真实数据、L0-L4 层级、列式导航和播放状态契约已形成可运行原型与交互基线；当前主要工作转入 Storyboard，素材图谱保留为素材来源。",
+        "inScope": [
+          "模块 A 素材图谱视图",
+          "L0-L4 逐层素材导航",
+          "独立列滚动与整体横向浏览",
+          "active、related、muted 与当前钻取状态",
+          "真实聚类数据与 Chunk 详情",
+          "L2 多机位轨道及模块 B 预览联动"
+        ],
+        "outOfScope": [
+          "Storyboard 故事结构与候选池",
+          "Agent 对话模块",
+          "模块 C 粗剪实现",
+          "报告正文"
+        ],
+        "purpose": "让用户从全局素材结构逐层进入主题、环节、场景和 Chunk，在不丢失上下文的情况下探索大型素材库并联动预览。",
+        "revisions": [
+          {
+            "changes": [
+              "确认素材图谱隶属于模块 A",
+              "采用 L0-L4 的渐进式展开",
+              "使用真实项目数据而非报告映射"
+            ],
+            "id": "material-revision-hierarchy",
+            "sourceIDs": [
+              "source-codex-material-storyboard",
+              "source-material-graph-repo"
+            ],
+            "status": "confirmed",
+            "summary": "素材图谱被重新定义为模块 A 内的分层素材导航，而不是独立页面或报告的另一种渲染。",
+            "timestamp": "2026-06-17T08:37:38.021Z",
+            "title": "模块归属与层级模型确认"
+          },
+          {
+            "changes": [
+              "focus 与 playhead 独立",
+              "蓝框继续表示模块 B 来源",
+              "L2 轨道默认复用多机位契约"
+            ],
+            "id": "material-revision-contract",
+            "sourceIDs": [
+              "source-claude-material",
+              "source-codex-material-storyboard",
+              "source-spec-global"
+            ],
+            "status": "confirmed",
+            "summary": "素材图谱只新增分层导航，基础播放和选择行为沿用已经确认的跨模块契约。",
+            "timestamp": "2026-06-18T07:48:38.820Z",
+            "title": "素材图谱交互契约收束"
+          },
+          {
+            "changes": [
+              "素材图谱保留为完整素材库视图",
+              "Storyboard 作为独立工作线继续实验"
+            ],
+            "id": "material-revision-role",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "observed",
+            "summary": "后续实验开始把素材理解与故事编排分开建模，素材图谱不再承载 Storyboard 本身。",
+            "timestamp": "2026-07-09T09:59:56.067Z",
+            "title": "素材库与 Storyboard 工作线分开"
+          }
+        ],
+        "understanding": [
+          {
+            "id": "material-understanding-role",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "素材图谱属于模块 A，是报告和多机位之外的素材理解视图，不是独立产品页面。",
+            "updatedAt": "2026-06-17T08:37:38.020Z"
+          },
+          {
+            "id": "material-understanding-hierarchy",
+            "sourceIDs": [
+              "source-codex-material-storyboard",
+              "source-material-graph-repo"
+            ],
+            "status": "observed",
+            "text": "当前数据和原型以 L0 全局概览、L1 主题聚类、L2 时间或故事环节、L3 场景、L4 Chunk 详情逐层展开。",
+            "updatedAt": "2026-06-17T08:37:38.021Z"
+          },
+          {
+            "id": "material-understanding-scroll",
+            "sourceIDs": [
+              "source-claude-material",
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "每一列负责自己的纵向滚动，整个图谱负责横向浏览；钻入新层级时让当前列进入可读区域，但不重置其他列的局部上下文。",
+            "updatedAt": "2026-06-18T07:48:38.820Z"
+          },
+          {
+            "id": "material-understanding-state",
+            "sourceIDs": [
+              "source-claude-material",
+              "source-spec-global"
+            ],
+            "status": "confirmed",
+            "text": "focused Chunk、playhead 和蓝框不能共享状态；单击选择不移动 playhead，明确的预览动作才定位播放。",
+            "updatedAt": "2026-06-18T07:48:38.820Z"
+          },
+          {
+            "id": "material-understanding-multicam",
+            "sourceIDs": [
+              "source-claude-material",
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "L2 下的多机位轨道默认复用多机位版本的交互，素材图谱只记录视觉、时间范围和层级联动等明确例外。",
+            "updatedAt": "2026-06-18T07:48:38.820Z"
+          }
+        ]
+      },
+      "createdAt": "2026-06-17T08:37:38.009Z",
+      "events": [
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [
+            "素材图谱是模块 A 的新增视图",
+            "实验必须与正式前端并行且使用真实数据"
+          ],
+          "id": "material-project-start",
+          "kind": "projectStarted",
+          "loopStage": "reconstruction",
+          "operations": {
+            "branch": "experiment/material-graph",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "在独立实验环境中接入正式 Demo 数据，开始重做模块 A 的素材图谱视图。",
+          "tags": [
+            "模块 A",
+            "真实数据"
+          ],
+          "timestamp": "2026-06-17T08:37:38.009Z",
+          "title": "素材图谱前端实验开始"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [
+            "早期原型误把图谱做成独立路由",
+            "早期层级曾读取成报告映射"
+          ],
+          "id": "material-audit-start",
+          "kind": "investigation",
+          "loopStage": "audit",
+          "operations": {
+            "branch": "experiment/material-graph",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "material-project-start"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "对照正式 Demo、真实数据与模块 A 布局，重新检查图谱归属和层级。",
+          "tags": [
+            "架构审计"
+          ],
+          "taskID": "task-material-interaction",
+          "timestamp": "2026-06-17T08:37:38.020Z",
+          "title": "校正模块归属与真实数据"
+        },
+        {
+          "decisions": [
+            {
+              "id": "material-hierarchy-decision",
+              "rationale": "素材探索需要保留父层上下文，并逐层缩小信息范围。",
+              "sourceIDs": [
+                "source-codex-material-storyboard",
+                "source-material-graph-repo"
+              ],
+              "status": "confirmed",
+              "text": "素材图谱采用模块 A 内的 L0-L4 渐进式列导航"
+            }
+          ],
+          "delivery": {
+            "checks": [],
+            "stage": "changed"
+          },
+          "facts": [],
+          "id": "material-hierarchy-confirmed",
+          "kind": "decision",
+          "loopStage": "confirmation",
+          "operations": {
+            "branch": "experiment/material-graph",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "material-audit-start"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "确认 L0-L4 层级、列式渐进展开和模块 A/B/C 的整体页面关系。",
+          "tags": [
+            "L0-L4",
+            "渐进展开"
+          ],
+          "taskID": "task-material-interaction",
+          "timestamp": "2026-06-17T10:00:00.000Z",
+          "title": "层级与页面结构确认"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "changed"
+          },
+          "facts": [
+            "focus、playhead、蓝框和组滚动是不同状态"
+          ],
+          "id": "material-model-current",
+          "kind": "decision",
+          "loopStage": "modeling",
+          "operations": {
+            "branch": "experiment/material-graph",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "material-hierarchy-confirmed"
+          ],
+          "sourceIDs": [
+            "source-claude-material",
+            "source-codex-material-storyboard",
+            "source-spec-global"
+          ],
+          "summary": "拆开 focus、playhead、播放来源和列导航，避免图谱操作隐式改变预览状态。",
+          "tags": [
+            "状态模型"
+          ],
+          "taskID": "task-material-interaction",
+          "timestamp": "2026-06-18T07:48:38.820Z",
+          "title": "素材图谱状态契约收束"
+        },
+        {
+          "decisions": [
+            {
+              "id": "material-multicam-decision",
+              "rationale": "素材图谱无需重新发明已经在多机位版本确认的基础操作。",
+              "sourceIDs": [
+                "source-claude-material",
+                "source-spec-global"
+              ],
+              "status": "confirmed",
+              "text": "L2 多机位轨道默认复用多机位版本交互，只记录素材图谱明确例外"
+            }
+          ],
+          "delivery": {
+            "checks": [
+              "交互路径核对"
+            ],
+            "stage": "userAccepted",
+            "verifiedAt": "2026-06-18T07:55:08.119Z"
+          },
+          "facts": [
+            "主路径与 Chunk 预览足以覆盖当前标注",
+            "框选和蓝框不重复细化"
+          ],
+          "id": "material-contract-confirmed",
+          "kind": "accepted",
+          "loopStage": "acceptance",
+          "operations": {
+            "branch": "experiment/material-graph",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "material-model-current"
+          ],
+          "sourceIDs": [
+            "source-claude-material",
+            "source-codex-material-storyboard",
+            "source-spec-global"
+          ],
+          "summary": "素材图谱只保留主路径和特有层级交互，其余复用全局与多机位契约。",
+          "tags": [
+            "交互契约"
+          ],
+          "taskID": "task-material-interaction",
+          "timestamp": "2026-06-18T07:55:08.119Z",
+          "title": "主路径与复用边界确认"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "真实数据原型",
+              "交互文档"
+            ],
+            "stage": "rendered",
+            "verifiedAt": "2026-07-09T09:52:00.319Z"
+          },
+          "facts": [
+            "素材图谱可作为完整素材库独立查看",
+            "Storyboard 后续作为另一工作线继续实验"
+          ],
+          "id": "material-baseline-integrated",
+          "kind": "handedOff",
+          "loopStage": "integration",
+          "operations": {
+            "branch": "experiment/agent-storyboard-v6-v41",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "material-contract-confirmed"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "素材图谱的层级、真实数据与交互基线保留下来，当前探索重点转向 Storyboard。",
+          "tags": [
+            "基线",
+            "工作转移"
+          ],
+          "timestamp": "2026-07-09T09:52:00.319Z",
+          "title": "素材图谱成为素材库基线"
+        }
+      ],
+      "graphPosition": {
+        "x": 560,
+        "y": 400
+      },
+      "id": "reframe-material-graph",
+      "lastActivityAt": "2026-07-09T09:52:00.319Z",
+      "name": "Reframe · 素材图谱",
+      "sourceIDs": [
+        "source-codex-material-storyboard",
+        "source-claude-material",
+        "source-spec-global",
+        "source-spec-a",
+        "source-material-graph-repo"
+      ],
+      "status": "waiting",
+      "summary": "模块 A 的分层素材导航与播放语义实验",
+      "tasks": [
+        {
+          "accent": "green",
+          "branchedFromEventID": "material-project-start",
+          "completedAt": "2026-07-09T09:52:00.319Z",
+          "currentStage": "completed",
+          "id": "task-material-interaction",
+          "mergedByEventID": "material-baseline-integrated",
+          "objective": "用真实数据建立模块 A 的 L0-L4 素材导航，并明确列滚动、focus、playhead、蓝框与多机位轨道的契约。",
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-claude-material",
+            "source-spec-a",
+            "source-spec-global",
+            "source-material-graph-repo"
+          ],
+          "startedAt": "2026-06-17T08:37:38.009Z",
+          "status": "completed",
+          "tags": [
+            "模块 A",
+            "素材图谱",
+            "交互模型",
+            "真实数据"
+          ],
+          "title": "素材图谱层级与交互基线",
+          "updatedAt": "2026-07-09T09:52:00.319Z"
+        }
+      ],
+      "updatedAt": "2026-07-10T09:10:03.000Z"
+    },
+    {
+      "accent": "violet",
+      "context": {
+        "currentSummary": "核心已收束为结构可视化与候选池：A 提供素材来源，Storyboard 组织 Chapter、Beat、SubBeat 和编排，B 负责验证；A/S/B/C 的布局与编排呈现仍在真实数据上实验，尚未形成最终产品形态。",
+        "inScope": [
+          "Chapter、Beat、SubBeat 故事结构",
+          "候选池与 Candidate 证据",
+          "编排结果、顺序与编排理由",
+          "Agent 对话修改与结构引用",
+          "模块 A、B、C 的协同路径",
+          "真实 Storyboard 数据与前端形态实验"
+        ],
+        "outOfScope": [
+          "一步生成最终成片",
+          "以表单直接编辑故事结构",
+          "精剪与最终交付",
+          "把任一 V4、V5、V6 实验布局直接当作产品定稿"
+        ],
+        "purpose": "在素材理解与粗剪之间提供可检查、可反复调整的故事结构和候选素材编排，让 Agent 降低认知负担而不是黑盒一步成片。",
+        "revisions": [
+          {
+            "changes": [
+              "Storyboard 不替代模块 A 或 C",
+              "将其定义为素材库到时间线的中间态",
+              "候选池增删改可由 Agent 与素材库共同完成"
+            ],
+            "id": "storyboard-revision-bridge",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "summary": "Storyboard 的产品位置从脚本视图收束为素材理解到粗剪之间的编排桥梁。",
+            "timestamp": "2026-06-24T09:13:47.660Z",
+            "title": "Storyboard 桥梁定位确认"
+          },
+          {
+            "changes": [
+              "核心收束为结构可视化与候选池",
+              "候选池承担 human in the loop",
+              "结构修改主要通过对话完成"
+            ],
+            "id": "storyboard-revision-core",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "summary": "Storyboard 不追求功能堆叠，主要解决故事结构建立和候选素材可控编排。",
+            "timestamp": "2026-07-07T10:05:39.323Z",
+            "title": "核心产品模型收束"
+          },
+          {
+            "changes": [
+              "连续测试 A/S/B/C 的上下与左右关系",
+              "测试图谱、大纲、矩阵与传统分镜表达",
+              "保留真实数据验证，暂不固化布局"
+            ],
+            "id": "storyboard-revision-layout",
+            "sourceIDs": [
+              "source-codex-material-storyboard",
+              "source-material-graph-repo"
+            ],
+            "status": "observed",
+            "summary": "当前多种布局都只是验证信息顺序、拖拽路径和编排可读性的探针。",
+            "timestamp": "2026-07-10T08:38:14.884Z",
+            "title": "Storyboard 进入形态实验"
+          }
+        ],
+        "understanding": [
+          {
+            "id": "storyboard-understanding-core",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "Storyboard 的核心不是画一个传统分镜板，而是把故事结构与候选素材编排持续保留下来并可检查。",
+            "updatedAt": "2026-07-07T10:05:39.323Z"
+          },
+          {
+            "id": "storyboard-understanding-bridge",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "Storyboard 是模块 A 的素材理解与模块 C 的时间线之间的桥梁，不是两者的替代品。",
+            "updatedAt": "2026-06-24T09:13:47.660Z"
+          },
+          {
+            "id": "storyboard-understanding-pool",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "候选池既是用户保持 human in the loop 的主要干预面，也是 Agent 针对当前结构进行编排的精确上下文。",
+            "updatedAt": "2026-07-07T10:05:39.323Z"
+          },
+          {
+            "id": "storyboard-understanding-edit",
+            "sourceIDs": [
+              "source-codex-material-storyboard"
+            ],
+            "status": "confirmed",
+            "text": "Chapter、Beat、SubBeat 的结构修改主要通过对话重新理解完成；界面重点是阅读、选择、引用与验证，而非表单式直接编辑。",
+            "updatedAt": "2026-07-08T01:39:21.089Z"
+          },
+          {
+            "id": "storyboard-understanding-experiment",
+            "sourceIDs": [
+              "source-codex-material-storyboard",
+              "source-material-graph-repo"
+            ],
+            "status": "observed",
+            "text": "V4、V5、V6 以及图谱、大纲、矩阵、传统分镜等形态都是实验记录；当前确认的是产品对象和工作流，不是最终布局。",
+            "updatedAt": "2026-07-10T08:38:14.884Z"
+          }
+        ]
+      },
+      "createdAt": "2026-06-17T08:37:38.138Z",
+      "events": [
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [
+            "后端已经有 Storyboard 与 Agent 数据",
+            "早期需要先分清它和素材图谱、报告、时间线的关系"
+          ],
+          "id": "storyboard-project-start",
+          "kind": "projectStarted",
+          "loopStage": "reconstruction",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "从 Agent 的真实逻辑和 Storyboard 数据开始，先重建产品对象与工作流。",
+          "tags": [
+            "产品建模",
+            "Storyboard"
+          ],
+          "timestamp": "2026-06-17T08:37:38.138Z",
+          "title": "Storyboard 产品建模开始"
+        },
+        {
+          "decisions": [
+            {
+              "id": "storyboard-bridge-decision",
+              "rationale": "用户需要在素材理解和正式落到时间线之间保留一个可反复调整的中间状态。",
+              "sourceIDs": [
+                "source-codex-material-storyboard"
+              ],
+              "status": "confirmed",
+              "text": "Storyboard 是从模块 A 到模块 C 的过渡，不替代任一模块"
+            }
+          ],
+          "delivery": {
+            "checks": [],
+            "stage": "userAccepted",
+            "verifiedAt": "2026-06-24T09:13:47.660Z"
+          },
+          "facts": [
+            "V4 的 D/S/B 编排路径最符合当时的产品逻辑"
+          ],
+          "id": "storyboard-bridge-confirmed",
+          "kind": "accepted",
+          "loopStage": "confirmation",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "storyboard-project-start"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard"
+          ],
+          "summary": "确认 Storyboard 的桥梁角色，候选池可通过 Agent 与素材库共同调整。",
+          "tags": [
+            "产品定位"
+          ],
+          "taskID": "task-storyboard-model",
+          "timestamp": "2026-06-24T09:13:47.660Z",
+          "title": "Storyboard 桥梁定位确认"
+        },
+        {
+          "decisions": [
+            {
+              "id": "storyboard-core-decision",
+              "rationale": "Reframe 的目标是简化认知并保持用户控制，而不是黑盒一步成片。",
+              "sourceIDs": [
+                "source-codex-material-storyboard"
+              ],
+              "status": "confirmed",
+              "text": "Storyboard 的核心是结构可视化与候选池"
+            }
+          ],
+          "delivery": {
+            "checks": [
+              "产品对象与用户路径讨论"
+            ],
+            "stage": "userAccepted",
+            "verifiedAt": "2026-07-07T10:05:39.323Z"
+          },
+          "facts": [
+            "候选池保证 human in the loop",
+            "候选池为 Agent 提供精确上下文",
+            "结构不采用表单式直接编辑"
+          ],
+          "id": "storyboard-core-confirmed",
+          "kind": "accepted",
+          "loopStage": "acceptance",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "storyboard-bridge-confirmed"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard"
+          ],
+          "summary": "核心收束到故事结构与候选池，并明确 Agent 与用户各自的控制面。",
+          "tags": [
+            "结构可视化",
+            "候选池"
+          ],
+          "taskID": "task-storyboard-model",
+          "timestamp": "2026-07-07T10:05:39.323Z",
+          "title": "Storyboard 核心模型确认"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "changed"
+          },
+          "facts": [
+            "连续测试 V4、V5、V6 的模块关系",
+            "测试上下、左右、双面板和隐藏模块等布局"
+          ],
+          "id": "storyboard-layout-experiments",
+          "kind": "implementation",
+          "loopStage": "modeling",
+          "operations": {
+            "branch": "experiment/agent-storyboard-v6-v41",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "storyboard-core-confirmed"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "通过多个隔离前端版本比较 Storyboard 与 A/B/C 的信息顺序、拖拽方向和空间关系。",
+          "tags": [
+            "V4",
+            "V5",
+            "V6",
+            "布局实验"
+          ],
+          "taskID": "task-storyboard-layout",
+          "timestamp": "2026-07-08T03:37:03.367Z",
+          "title": "A/S/B/C 布局实验展开"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "真实 Storyboard 数据预览",
+              "可交互原型"
+            ],
+            "stage": "rendered",
+            "verifiedAt": "2026-07-10T08:38:14.884Z"
+          },
+          "facts": [
+            "已能查看 Chapter、Beat、SubBeat、候选池和编排结果",
+            "已测试图谱、大纲、矩阵与传统分镜表达",
+            "最终布局仍未确认"
+          ],
+          "id": "storyboard-current-prototype",
+          "kind": "verification",
+          "loopStage": "verification",
+          "operations": {
+            "branch": "experiment/agent-storyboard-v6-v41",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "files": [],
+            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "runtime": [
+              "http://127.0.0.1:1430"
+            ]
+          },
+          "parentEventIDs": [
+            "storyboard-layout-experiments"
+          ],
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "summary": "核心对象已在真实数据原型中可见和可交互，当前继续比较编排表达与模块布局。",
+          "tags": [
+            "真实数据",
+            "原型"
+          ],
+          "taskID": "task-storyboard-layout",
+          "timestamp": "2026-07-10T08:38:14.884Z",
+          "title": "Storyboard 核心对象进入可运行原型"
+        }
+      ],
+      "graphPosition": {
+        "x": 655,
+        "y": 530
+      },
+      "id": "reframe-storyboard",
+      "lastActivityAt": "2026-07-10T08:38:14.884Z",
+      "name": "Reframe · Storyboard",
+      "sourceIDs": [
+        "source-codex-material-storyboard",
+        "source-material-graph-repo",
+        "source-reframe-repo",
+        "source-spec-a"
+      ],
+      "status": "active",
+      "summary": "故事结构、候选池与素材编排的可视化实验",
+      "tasks": [
+        {
+          "accent": "violet",
+          "branchedFromEventID": "storyboard-project-start",
+          "completedAt": "2026-07-07T10:05:39.323Z",
+          "currentStage": "completed",
+          "id": "task-storyboard-model",
+          "mergedByEventID": "storyboard-core-confirmed",
+          "objective": "从真实 Agent 与 Storyboard 数据中确认产品角色、对象、边界和最短用户路径。",
+          "sourceIDs": [
+            "source-codex-material-storyboard"
+          ],
+          "startedAt": "2026-06-17T08:37:38.138Z",
+          "status": "completed",
+          "tags": [
+            "产品建模",
+            "结构可视化",
+            "候选池"
+          ],
+          "title": "Storyboard 产品模型",
+          "updatedAt": "2026-07-07T10:05:39.323Z"
+        },
+        {
+          "accent": "cyan",
+          "branchedFromEventID": "storyboard-core-confirmed",
+          "currentStage": "modeling",
+          "id": "task-storyboard-layout",
+          "objective": "用真实数据比较 A/S/B/C 布局和编排呈现，找到最少认知与最顺操作路径。",
+          "sourceIDs": [
+            "source-codex-material-storyboard",
+            "source-material-graph-repo"
+          ],
+          "startedAt": "2026-07-08T03:37:03.367Z",
+          "status": "active",
+          "tags": [
+            "布局实验",
+            "真实数据",
+            "编排呈现"
+          ],
+          "title": "Storyboard 布局与编排形态",
+          "updatedAt": "2026-07-10T08:38:14.884Z"
+        }
+      ],
+      "updatedAt": "2026-07-10T09:10:03.000Z"
+    },
+    {
+      "accent": "cyan",
+      "context": {
+        "currentSummary": "RC 与 Beta 的主页、两套在线产品手册、版本切换和 Beta Bayer 动态背景已经部署到 Vercel；当前处于完成状态。",
+        "inScope": [
+          "Reframe 官网主页",
+          "RC 与 Beta 两套产品叙事",
+          "RC Docs 与 Beta Docs",
+          "版本翻页切换",
+          "Beta Bayer 动态背景",
+          "Vercel 生产部署"
+        ],
+        "outOfScope": [
+          "Reframe 桌面端功能实现",
+          "把完整 Tauri 页面嵌入官网",
+          "未验证的产品承诺"
+        ],
+        "purpose": "用真实产品内容分别呈现稳定 RC 与下一代 Beta，并让访客从同一官网进入对应版本的在线产品手册。",
+        "revisions": [
+          {
+            "changes": [
+              "RC 与 Beta 使用独立产品叙事",
+              "主页与产品手册都支持版本切换",
+              "真实产品素材作为主要证据"
+            ],
+            "id": "website-revision-architecture",
+            "sourceIDs": [
+              "source-codex-reframe-website",
+              "source-reframe-website-repo"
+            ],
+            "status": "confirmed",
+            "summary": "官网从单一静态介绍页重构为 RC/Beta 两层产品与文档体系。",
+            "timestamp": "2026-07-03T09:30:47.488Z",
+            "title": "双版本信息架构确认"
+          },
+          {
+            "changes": [
+              "Navbar 保持稳定",
+              "Hero 和 Docs 内容通过页角切换",
+              "页角在切换完成后重新出现"
+            ],
+            "id": "website-revision-transition",
+            "sourceIDs": [
+              "source-codex-reframe-website",
+              "source-reframe-website-repo"
+            ],
+            "status": "confirmed",
+            "summary": "版本切换从打开/关闭模型改为可持续向下翻页的产品版本循环。",
+            "timestamp": "2026-07-06T03:05:09.501Z",
+            "title": "版本翻页模型收束"
+          },
+          {
+            "changes": [
+              "Beta 增加品牌色 Bayer WebGL 背景",
+              "主页与两套 Docs 部署生产"
+            ],
+            "id": "website-revision-published",
+            "sourceIDs": [
+              "source-codex-reframe-website",
+              "source-reframe-website-repo"
+            ],
+            "status": "confirmed",
+            "summary": "官网主要体验完成并发布到 Vercel 生产环境。",
+            "timestamp": "2026-07-06T03:16:13.128Z",
+            "title": "官网发布"
+          }
+        ],
+        "understanding": [
+          {
+            "id": "website-understanding-versions",
+            "sourceIDs": [
+              "source-codex-reframe-website"
+            ],
+            "status": "confirmed",
+            "text": "RC 与 Beta 面向不同产品阶段和控制方式，应该拥有独立内容与手册，但仍属于同一个 Reframe 官网。",
+            "updatedAt": "2026-07-03T09:30:47.488Z"
+          },
+          {
+            "id": "website-understanding-transition",
+            "sourceIDs": [
+              "source-codex-reframe-website"
+            ],
+            "status": "confirmed",
+            "text": "版本切换的核心是当前内容层被揭开并露出下一版本；Navbar 保持不动，切换完成后页角重新出现。",
+            "updatedAt": "2026-07-06T03:05:09.501Z"
+          },
+          {
+            "id": "website-understanding-evidence",
+            "sourceIDs": [
+              "source-codex-reframe-website"
+            ],
+            "status": "confirmed",
+            "text": "官网的主要视觉证据来自真实产品内容、动图与手册，而不是抽象营销插画。",
+            "updatedAt": "2026-07-03T09:30:47.488Z"
+          },
+          {
+            "id": "website-understanding-beta",
+            "sourceIDs": [
+              "source-codex-reframe-website",
+              "source-reframe-website-repo"
+            ],
+            "status": "confirmed",
+            "text": "Beta 使用品牌色 Bayer 动态背景形成版本识别，RC 不加载该效果。",
+            "updatedAt": "2026-07-06T03:09:42.918Z"
+          }
+        ]
+      },
+      "createdAt": "2026-07-03T09:25:45.140Z",
+      "events": [
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [],
+            "stage": "unchanged"
+          },
+          "facts": [
+            "RC 与 Agent/Beta 两套产品手册已经完成",
+            "旧网站只有基于 Figma 的初步结构"
+          ],
+          "id": "website-project-start",
+          "kind": "projectStarted",
+          "loopStage": "reconstruction",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "files": [],
+            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "runtime": []
+          },
+          "parentEventIDs": [],
+          "sourceIDs": [
+            "source-codex-reframe-website",
+            "source-reframe-website-repo"
+          ],
+          "summary": "基于两套完整产品手册和真实素材重构 Reframe 主页与在线文档。",
+          "tags": [
+            "官网",
+            "产品手册"
+          ],
+          "timestamp": "2026-07-03T09:25:45.140Z",
+          "title": "Reframe 官网重构开始"
+        },
+        {
+          "decisions": [
+            {
+              "id": "website-architecture-decision",
+              "rationale": "两个版本解决不同阶段和控制方式的问题，需要独立叙事但保持同一品牌入口。",
+              "sourceIDs": [
+                "source-codex-reframe-website"
+              ],
+              "status": "confirmed",
+              "text": "RC 与 Beta 使用双层主页和两套独立 Docs"
+            }
+          ],
+          "delivery": {
+            "checks": [],
+            "stage": "userAccepted",
+            "verifiedAt": "2026-07-03T09:40:29.680Z"
+          },
+          "facts": [],
+          "id": "website-architecture-confirmed",
+          "kind": "accepted",
+          "loopStage": "confirmation",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "files": [],
+            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "runtime": []
+          },
+          "parentEventIDs": [
+            "website-project-start"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-website"
+          ],
+          "summary": "确认 RC/Beta 双版本架构、主页与产品手册范围，并将生产部署纳入交付。",
+          "tags": [
+            "信息架构"
+          ],
+          "taskID": "task-website-rebuild",
+          "timestamp": "2026-07-03T09:40:29.680Z",
+          "title": "双版本官网架构确认"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "主页交互走查",
+              "12 个 Docs 页面"
+            ],
+            "stage": "rendered",
+            "verifiedAt": "2026-07-06T03:05:09.501Z"
+          },
+          "facts": [
+            "Navbar 在版本切换时保持不动",
+            "页角切换同时存在于主页和 Docs",
+            "切换完成后可继续翻到另一版本"
+          ],
+          "id": "website-transition-rendered",
+          "kind": "verification",
+          "loopStage": "verification",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "files": [
+              "index.html",
+              "js/docs-version-switch.js"
+            ],
+            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "runtime": [
+              "http://localhost:8080"
+            ]
+          },
+          "parentEventIDs": [
+            "website-architecture-confirmed"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-website",
+            "source-reframe-website-repo"
+          ],
+          "summary": "主页和文档的 RC/Beta 切换进入可运行状态，版本关系不再依赖关闭按钮。",
+          "tags": [
+            "版本切换",
+            "Docs"
+          ],
+          "taskID": "task-website-rebuild",
+          "timestamp": "2026-07-06T03:05:09.501Z",
+          "title": "双版本翻页与 Docs 切换完成"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "Beta Hero",
+              "Beta Docs"
+            ],
+            "stage": "rendered",
+            "verifiedAt": "2026-07-06T03:09:42.918Z"
+          },
+          "facts": [
+            "Bayer WebGL 使用品牌色",
+            "RC 页面不加载该效果"
+          ],
+          "id": "website-beta-visual-rendered",
+          "kind": "verification",
+          "loopStage": "verification",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "files": [],
+            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "runtime": [
+              "http://localhost:8080"
+            ]
+          },
+          "parentEventIDs": [
+            "website-transition-rendered"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-website",
+            "source-reframe-website-repo"
+          ],
+          "summary": "Beta 主页和文档加入品牌色 Bayer 动态背景，形成稳定版本识别。",
+          "tags": [
+            "Beta",
+            "WebGL"
+          ],
+          "taskID": "task-website-rebuild",
+          "timestamp": "2026-07-06T03:09:42.918Z",
+          "title": "Beta 视觉层完成"
+        },
+        {
+          "decisions": [],
+          "delivery": {
+            "checks": [
+              "主页 200",
+              "RC Docs 200",
+              "Beta Docs 200",
+              "Bayer 资源 200"
+            ],
+            "stage": "published",
+            "verifiedAt": "2026-07-06T03:16:13.128Z"
+          },
+          "facts": [
+            "生产地址为 https://reframe-website.vercel.app"
+          ],
+          "id": "website-production-published",
+          "kind": "completed",
+          "loopStage": "completed",
+          "operations": {
+            "branch": "",
+            "commit": "",
+            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "files": [],
+            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "runtime": [
+              "https://reframe-website.vercel.app"
+            ]
+          },
+          "parentEventIDs": [
+            "website-beta-visual-rendered"
+          ],
+          "sourceIDs": [
+            "source-codex-reframe-website",
+            "source-reframe-website-repo"
+          ],
+          "summary": "主页、RC Docs、Beta Docs 与 Bayer 资源全部发布到 Vercel 生产环境。",
+          "tags": [
+            "Vercel",
+            "生产"
+          ],
+          "taskID": "task-website-rebuild",
+          "timestamp": "2026-07-06T03:16:13.128Z",
+          "title": "Reframe 官网生产发布"
+        }
+      ],
+      "graphPosition": {
+        "x": 250,
+        "y": 650
+      },
+      "id": "reframe-website",
+      "lastActivityAt": "2026-07-06T03:16:13.128Z",
+      "name": "Reframe · 官网",
+      "sourceIDs": [
+        "source-codex-reframe-website",
+        "source-reframe-website-repo"
+      ],
+      "status": "completed",
+      "summary": "RC / Beta 双版本官网与在线产品手册",
+      "tasks": [
+        {
+          "accent": "cyan",
+          "branchedFromEventID": "website-project-start",
+          "completedAt": "2026-07-06T03:16:13.128Z",
+          "currentStage": "completed",
+          "id": "task-website-rebuild",
+          "mergedByEventID": "website-production-published",
+          "objective": "用真实产品内容重构 RC/Beta 双版本主页与在线手册，并发布到生产环境。",
+          "sourceIDs": [
+            "source-codex-reframe-website",
+            "source-reframe-website-repo"
+          ],
+          "startedAt": "2026-07-03T09:25:45.140Z",
+          "status": "completed",
+          "tags": [
+            "官网",
+            "RC",
+            "Beta",
+            "Docs",
+            "Vercel"
+          ],
+          "title": "Reframe 双版本官网重构",
+          "updatedAt": "2026-07-06T03:16:13.128Z"
+        }
+      ],
+      "updatedAt": "2026-07-10T09:10:03.000Z"
+    }
+  ],
+  "relations": [
+    {
+      "createdAt": "2026-06-24T09:13:47.660Z",
+      "fromProjectID": "reframe-material-graph",
+      "id": "relation-material-storyboard",
+      "kind": "sharesContext",
+      "label": "素材理解进入编排",
+      "sourceIDs": [
+        "source-codex-material-storyboard"
+      ],
+      "status": "confirmed",
+      "toProjectID": "reframe-storyboard"
+    },
+    {
+      "createdAt": "2026-07-03T09:30:47.488Z",
+      "fromProjectID": "reframe-multicam",
+      "id": "relation-multicam-website",
+      "kind": "sharesContext",
+      "label": "RC 产品内容",
+      "sourceIDs": [
+        "source-codex-reframe-website"
+      ],
+      "status": "confirmed",
+      "toProjectID": "reframe-website"
+    },
+    {
+      "createdAt": "2026-07-03T09:30:47.488Z",
+      "fromProjectID": "reframe-storyboard",
+      "id": "relation-storyboard-website",
+      "kind": "sharesContext",
+      "label": "Beta 产品内容",
+      "sourceIDs": [
+        "source-codex-reframe-website"
+      ],
+      "status": "confirmed",
+      "toProjectID": "reframe-website"
+    }
+  ],
+  "sources": [
+    {
+      "id": "source-codex-reframe-app",
+      "kind": "conversation",
+      "label": "Codex · Reframe 正式前端与项目流程",
+      "locator": "/Users/timshu/.codex/sessions/2026/05/21/rollout-2026-05-21T10-11-03-019e484c-f52f-7270-9ae1-8270780dc74b.jsonl"
+    },
+    {
+      "id": "source-codex-material-storyboard",
+      "kind": "conversation",
+      "label": "Codex · 素材图谱与 Storyboard 实验",
+      "locator": "/Users/timshu/.codex/sessions/2026/06/17/rollout-2026-06-17T16-37-37-019ed4ba-92b3-7632-978e-4272a3b8a251.jsonl"
+    },
+    {
+      "id": "source-codex-reframe-website",
+      "kind": "conversation",
+      "label": "Codex · Reframe Website",
+      "locator": "/Users/timshu/.codex/sessions/2026/06/30/rollout-2026-06-30T16-25-26-019f17a2-16de-7e70-90df-ee721bc186f6.jsonl"
+    },
+    {
+      "id": "source-material-graph-repo",
+      "kind": "repository",
+      "label": "Reframe Material Graph 实验仓库",
+      "locator": "/Users/timshu/Documents/reframe-app-material-graph"
+    },
+    {
+      "id": "source-reframe-website-repo",
+      "kind": "repository",
+      "label": "Reframe Website",
+      "locator": "/Users/timshu/Documents/Reframe_Website"
+    }
+  ]
+}

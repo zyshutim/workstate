@@ -1,0 +1,31 @@
+{
+  "mode": "route",
+  "segment": {
+    "id": "smoke:turn",
+    "threadID": "smoke",
+    "turnID": "turn",
+    "sourcePath": "/tmp/smoke.jsonl",
+    "cwd": "/Users/timshu/Documents/Workstate",
+    "userText": "Workstate 的审核箱入口应该放在项目图谱第一层。",
+    "assistantText": "审核箱入口已确认为 L1 顶栏铃铛。",
+    "timestamp": "2026-07-16T03:00:00Z"
+  },
+  "projects": [
+    {
+      "id": "workstate",
+      "name": "Workstate",
+      "summary": "本地项目工作记忆工具",
+      "purpose": "维护跨会话项目认知",
+      "status": "active",
+      "activeWorklines": []
+    },
+    {
+      "id": "reframe-beta",
+      "name": "Reframe Beta",
+      "summary": "素材图谱与 Storyboard 前端实验",
+      "purpose": "验证下一版 Reframe 交互",
+      "status": "active",
+      "activeWorklines": []
+    }
+  ]
+}
