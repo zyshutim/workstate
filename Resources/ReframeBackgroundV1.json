@@ -267,11 +267,11 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [
               "src/views/ProjectReportPage.vue"
             ],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [],
@@ -306,12 +306,12 @@
           "operations": {
             "branch": "dev-frontend",
             "commit": "9cdcdd1",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [
               "src/views/ProjectReportPage.vue",
               "src/components/video/SimpleVideoPlayer.vue"
             ],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [
@@ -342,11 +342,11 @@
           "operations": {
             "branch": "report-narrative-paragraphs",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [
               "src/views/ProjectReportPage.vue"
             ],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [
@@ -388,11 +388,11 @@
           "operations": {
             "branch": "report-narrative-paragraphs",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [
               "src/views/ProjectReportPage.vue"
             ],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [
@@ -430,11 +430,11 @@
           "operations": {
             "branch": "report-narrative-paragraphs",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [
               "src/views/ProjectReportPage.vue"
             ],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [
@@ -468,11 +468,11 @@
           "operations": {
             "branch": "report-narrative-paragraphs",
             "commit": "f2e2ab1",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [
               "src/views/ProjectReportPage.vue"
             ],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [
@@ -512,9 +512,9 @@
           "operations": {
             "branch": "dev-frontend",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app",
+            "cwd": "/Users/demo/Documents/reframe-app",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app",
+            "repository": "/Users/demo/Documents/reframe-app",
             "runtime": []
           },
           "parentEventIDs": [
@@ -754,9 +754,9 @@
           "operations": {
             "branch": "experiment/material-graph",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [],
@@ -788,9 +788,9 @@
           "operations": {
             "branch": "experiment/material-graph",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -832,9 +832,9 @@
           "operations": {
             "branch": "experiment/material-graph",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -868,9 +868,9 @@
           "operations": {
             "branch": "experiment/material-graph",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -919,9 +919,9 @@
           "operations": {
             "branch": "experiment/material-graph",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -960,9 +960,9 @@
           "operations": {
             "branch": "experiment/agent-storyboard-v6-v41",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -1161,9 +1161,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [],
@@ -1205,9 +1205,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -1254,9 +1254,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -1290,9 +1290,9 @@
           "operations": {
             "branch": "experiment/agent-storyboard-v6-v41",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": []
           },
           "parentEventIDs": [
@@ -1334,9 +1334,9 @@
           "operations": {
             "branch": "experiment/agent-storyboard-v6-v41",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/reframe-app-material-graph",
+            "cwd": "/Users/demo/Documents/reframe-app-material-graph",
             "files": [],
-            "repository": "/Users/timshu/Documents/reframe-app-material-graph",
+            "repository": "/Users/demo/Documents/reframe-app-material-graph",
             "runtime": [
               "http://127.0.0.1:1430"
             ]
@@ -1543,9 +1543,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "cwd": "/Users/demo/Documents/Reframe_Website",
             "files": [],
-            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "repository": "/Users/demo/Documents/Reframe_Website",
             "runtime": []
           },
           "parentEventIDs": [],
@@ -1585,9 +1585,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "cwd": "/Users/demo/Documents/Reframe_Website",
             "files": [],
-            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "repository": "/Users/demo/Documents/Reframe_Website",
             "runtime": []
           },
           "parentEventIDs": [
@@ -1625,12 +1625,12 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "cwd": "/Users/demo/Documents/Reframe_Website",
             "files": [
               "index.html",
               "js/docs-version-switch.js"
             ],
-            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "repository": "/Users/demo/Documents/Reframe_Website",
             "runtime": [
               "http://localhost:8080"
             ]
@@ -1671,9 +1671,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "cwd": "/Users/demo/Documents/Reframe_Website",
             "files": [],
-            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "repository": "/Users/demo/Documents/Reframe_Website",
             "runtime": [
               "http://localhost:8080"
             ]
@@ -1715,9 +1715,9 @@
           "operations": {
             "branch": "",
             "commit": "",
-            "cwd": "/Users/timshu/Documents/Reframe_Website",
+            "cwd": "/Users/demo/Documents/Reframe_Website",
             "files": [],
-            "repository": "/Users/timshu/Documents/Reframe_Website",
+            "repository": "/Users/demo/Documents/Reframe_Website",
             "runtime": [
               "https://reframe-website.vercel.app"
             ]
@@ -1824,31 +1824,31 @@
       "id": "source-codex-reframe-app",
       "kind": "conversation",
       "label": "Codex · Reframe 正式前端与项目流程",
-      "locator": "/Users/timshu/.codex/sessions/2026/05/21/rollout-2026-05-21T10-11-03-019e484c-f52f-7270-9ae1-8270780dc74b.jsonl"
+      "locator": "/Users/demo/.codex/sessions/2026/05/21/rollout-2026-05-21T10-11-03-demo-multicam-session.jsonl"
     },
     {
       "id": "source-codex-material-storyboard",
       "kind": "conversation",
       "label": "Codex · 素材图谱与 Storyboard 实验",
-      "locator": "/Users/timshu/.codex/sessions/2026/06/17/rollout-2026-06-17T16-37-37-019ed4ba-92b3-7632-978e-4272a3b8a251.jsonl"
+      "locator": "/Users/demo/.codex/sessions/2026/06/17/rollout-2026-06-17T16-37-37-demo-material-session.jsonl"
     },
     {
       "id": "source-codex-reframe-website",
       "kind": "conversation",
       "label": "Codex · Reframe Website",
-      "locator": "/Users/timshu/.codex/sessions/2026/06/30/rollout-2026-06-30T16-25-26-019f17a2-16de-7e70-90df-ee721bc186f6.jsonl"
+      "locator": "/Users/demo/.codex/sessions/2026/06/30/rollout-2026-06-30T16-25-26-demo-website-session.jsonl"
     },
     {
       "id": "source-material-graph-repo",
       "kind": "repository",
       "label": "Reframe Material Graph 实验仓库",
-      "locator": "/Users/timshu/Documents/reframe-app-material-graph"
+      "locator": "/Users/demo/Documents/reframe-app-material-graph"
     },
     {
       "id": "source-reframe-website-repo",
       "kind": "repository",
       "label": "Reframe Website",
-      "locator": "/Users/timshu/Documents/Reframe_Website"
+      "locator": "/Users/demo/Documents/Reframe_Website"
     }
   ]
 }

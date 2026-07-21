@@ -25,7 +25,7 @@ struct ReviewInboxPopover: View {
                 if snapshotRendering {
                     ReviewDetail(review: review, workspace: model.workspace)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(height: 424, alignment: .top)
+                        .frame(height: 326, alignment: .top)
                         .clipped()
                 } else {
                     ScrollView {
@@ -33,7 +33,7 @@ struct ReviewInboxPopover: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxWidth: .infinity)
-                    .frame(height: 424)
+                    .frame(height: 326)
                     .layoutPriority(1)
                     .scrollIndicators(.visible)
                 }
@@ -70,7 +70,7 @@ struct ReviewInboxPopover: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("待确认")
                     .font(WorkstateTheme.headlineFont)
-                Text("仅包含歧义、冲突和项目结构变化")
+                Text("只显示需要你决定的冲突")
                     .font(WorkstateTheme.microFont)
                     .foregroundStyle(WorkstateTheme.secondaryLabel)
             }
@@ -165,7 +165,7 @@ private struct ReviewDetail: View {
     let workspace: WorkspaceSnapshot
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(review.kind.displayName)
                     .font(WorkstateTheme.microFont)
@@ -175,44 +175,40 @@ private struct ReviewDetail: View {
                 Text(review.summary)
                     .font(WorkstateTheme.secondaryFont)
                     .foregroundStyle(WorkstateTheme.secondaryLabel)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            ReviewTextSection(title: "为什么需要确认", text: review.reason)
+            ReviewTextSection(title: "需要你决定", text: review.reason, lineLimit: 3)
 
             if !review.previousValue.isEmpty {
-                ReviewTextSection(title: "当前结论", text: review.previousValue)
+                ReviewTextSection(title: "当前", text: review.previousValue, lineLimit: 3)
             }
             if !review.proposedValue.isEmpty {
-                ReviewTextSection(title: "建议更新为", text: review.proposedValue, accent: review.kind.color)
+                ReviewTextSection(title: "建议", text: review.proposedValue, accent: review.kind.color, lineLimit: 3)
             }
 
             if !review.proposedChanges.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("具体变化")
+                    Text("影响")
                         .font(WorkstateTheme.captionEmphasisFont)
                         .foregroundStyle(WorkstateTheme.secondaryLabel)
-                    ForEach(review.proposedChanges, id: \.self) { change in
+                    ForEach(review.proposedChanges.prefix(3), id: \.self) { change in
                         Label(change, systemImage: "arrow.right")
                             .font(WorkstateTheme.captionFont)
+                            .lineLimit(2)
                     }
                 }
             }
 
             if !sources.isEmpty {
-                Rectangle()
-                    .fill(WorkstateTheme.separator.opacity(0.56))
-                    .frame(height: 0.5)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("对话证据")
-                        .font(WorkstateTheme.captionEmphasisFont)
-                        .foregroundStyle(WorkstateTheme.secondaryLabel)
-
+                DisclosureGroup("查看原始对话") {
                     ForEach(sources) { source in
                         ConversationEvidence(source: source)
                     }
                 }
+                .font(WorkstateTheme.captionEmphasisFont)
+                .foregroundStyle(WorkstateTheme.secondaryLabel)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -229,6 +225,7 @@ private struct ReviewTextSection: View {
     let title: String
     let text: String
     var accent: Color = WorkstateTheme.primaryLabel
+    var lineLimit: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -238,6 +235,7 @@ private struct ReviewTextSection: View {
             Text(text)
                 .font(WorkstateTheme.secondaryFont)
                 .foregroundStyle(accent)
+                .lineLimit(lineLimit)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -298,6 +296,7 @@ private extension ReviewKind {
         switch self {
         case .ambiguousRouting: "归属不明确"
         case .candidateProject: "候选新项目"
+        case .projectUpdate: "项目进展"
         case .projectStructure: "项目结构变化"
         case .understandingConflict: "项目理解冲突"
         case .decisionConflict: "决策冲突"
@@ -308,6 +307,7 @@ private extension ReviewKind {
         switch self {
         case .ambiguousRouting: WorkstateTheme.warning
         case .candidateProject: WorkstateTheme.activeState
+        case .projectUpdate: WorkstateTheme.success
         case .projectStructure: WorkstateTheme.activeState
         case .understandingConflict: WorkstateTheme.warning
         case .decisionConflict: WorkstateTheme.danger

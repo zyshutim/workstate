@@ -9,11 +9,10 @@ enum WorkstateTheme {
     static let projectHeight: CGFloat = 790
     static let eventPopoverWidth: CGFloat = 416
     static let eventPopoverHeight: CGFloat = 560
+    static let eventTooltipWidth: CGFloat = 286
     static let headerHeight: CGFloat = 54
     static let graphNodeSize = CGSize(width: 190, height: 92)
-    static let timelineNodeWidth: CGFloat = 228
-    static let timelineLaneWidth: CGFloat = 92
-    static let timelineRowHeight: CGFloat = 78
+    static let timelineRowHeight: CGFloat = 62
 
     static let windowBackground = SmartisanColorTokens.adaptive(light: 0xF5F5F5, dark: 0x222325)
     static let contentBackground = SmartisanColorTokens.adaptive(light: 0xFFFFFF, dark: 0x333333)

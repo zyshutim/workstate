@@ -1,26 +1,19 @@
 import Foundation
 import WorkstateCore
 
-public enum AutomationMode: String, Sendable {
-    case shadow
-    case live
-}
-
 public struct OrchestrationSummary: Sendable {
     public var processed: Int
     public var changed: Int
-    public var reviews: Int
     public var ignored: Int
     public var agentRuns: Int
-    public var budgetPaused: Bool
+    public var failed: Int
 
-    public init(processed: Int = 0, changed: Int = 0, reviews: Int = 0, ignored: Int = 0, agentRuns: Int = 0, budgetPaused: Bool = false) {
+    public init(processed: Int = 0, changed: Int = 0, ignored: Int = 0, agentRuns: Int = 0, failed: Int = 0) {
         self.processed = processed
         self.changed = changed
-        self.reviews = reviews
         self.ignored = ignored
         self.agentRuns = agentRuns
-        self.budgetPaused = budgetPaused
+        self.failed = failed
     }
 }
 
@@ -28,169 +21,117 @@ public struct WorkstateOrchestrator: Sendable {
     public let service: WorkstateService
     public let scanner: CodexSessionScanner
     public let runtime: AgentRuntimeClient
-    public let mode: AutomationMode
-    public let maxAgentRunsPerBatch: Int
-    public let maxDailyInputTokens: Int
-    public let reservedInputTokensPerRun: Int
 
     public init(
         service: WorkstateService = .init(),
         scanner: CodexSessionScanner = .init(),
-        runtime: AgentRuntimeClient = .init(),
-        mode: AutomationMode = .shadow,
-        maxAgentRunsPerBatch: Int = 1,
-        maxDailyInputTokens: Int = 75_000,
-        reservedInputTokensPerRun: Int = 30_000
+        runtime: AgentRuntimeClient = .init()
     ) {
         self.service = service
         self.scanner = scanner
         self.runtime = runtime
-        self.mode = mode
-        self.maxAgentRunsPerBatch = maxAgentRunsPerBatch
-        self.maxDailyInputTokens = maxDailyInputTokens
-        self.reservedInputTokensPerRun = reservedInputTokensPerRun
     }
 
     public func process(_ segments: [SessionSegment]) throws -> OrchestrationSummary {
         var summary = OrchestrationSummary()
-        var processedIDs: [String] = []
 
-        processingLoop: for segment in segments {
-            guard summary.agentRuns < maxAgentRunsPerBatch else { break }
-            guard isMeaningful(segment) else {
-                processedIDs.append(segment.id)
-                summary.ignored += 1
+        for segment in segments {
+            var record = try scanner.processingRecord(segmentID: segment.id)
+            if record.stage == .completed {
+                try scanner.markProcessed(segmentIDs: [segment.id])
+                summary.processed += 1
                 continue
             }
-            let workspace = try service.snapshot()
-            let route: RouteResult
-            if let deterministic = deterministicRoute(segment: segment, workspace: workspace) {
-                route = deterministic
-            } else {
-                guard try hasAgentBudget() else {
-                    summary.budgetPaused = true
-                    break processingLoop
-                }
-                route = try runtime.route(segment: segment, workspace: workspace, scanner: scanner)
-                summary.agentRuns += 1
+            if record.stage == .failed {
+                summary.failed += 1
+                continue
+            }
+            if record.stage == .routing || record.stage == .stewarding || record.stage == .applying {
+                try scanner.failProcessing(
+                    segmentID: segment.id,
+                    failedStage: record.stage,
+                    error: "Processing was interrupted; explicit requeue is required"
+                )
+                summary.failed += 1
+                continue
             }
 
-            switch route.action {
-            case "ignore":
-                processedIDs.append(segment.id)
-                summary.ignored += 1
-            case "candidate_project", "ambiguous":
-                let source = evidenceSource(segment)
-                if mode == .live {
-                    _ = try service.addSource(source)
-                    _ = try service.upsertReview(
-                        ReviewItem(
-                            id: stableID(prefix: "review", segment: segment),
-                            kind: route.action == "candidate_project" ? .candidateProject : .ambiguousRouting,
-                            title: route.action == "candidate_project" ? "发现候选新项目" : "无法确定项目归属",
-                            summary: route.worklineHint.isEmpty ? segment.userText : route.worklineHint,
-                            reason: route.reason,
-                            proposedValue: route.projectId,
-                            sourceIDs: [source.id],
-                            createdAt: segment.timestamp,
-                            updatedAt: segment.timestamp
-                        )
-                    )
+            do {
+                let workspace = try service.snapshot()
+                let route: RouteResult
+                if let persisted = record.route {
+                    route = persisted
                 } else {
-                    try appendShadow(route, segment: segment)
+                    try scanner.beginProcessing(segmentID: segment.id, stage: .routing)
+                    route = try runtime.route(segment: segment, workspace: workspace, scanner: scanner)
+                    summary.agentRuns += 1
+                    try scanner.recordRouteResult(segmentID: segment.id, route: route)
+                    record = try scanner.processingRecord(segmentID: segment.id)
                 }
-                processedIDs.append(segment.id)
-                summary.reviews += 1
-            case "existing_project":
-                guard let project = workspace.project(id: route.projectId) else {
-                    throw WorkstateStorageError.missingProject(route.projectId)
+
+                if route.action == "ignore" {
+                    summary.ignored += 1
+                    try scanner.completeProcessing(segmentID: segment.id)
+                    try scanner.markProcessed(segmentIDs: [segment.id])
+                    summary.processed += 1
+                    continue
                 }
-                guard try hasAgentBudget() else {
-                    summary.budgetPaused = true
-                    break
+
+                let project: ProjectRecord
+                switch route.action {
+                case "continue_previous", "switch_project":
+                    if route.action == "continue_previous" {
+                        guard try scanner.routeBinding(threadID: segment.threadID)?.projectID == route.projectId else {
+                            throw WorkstateStorageError.invalidState("Router continued a project without a matching prior route")
+                        }
+                    }
+                    guard let existing = workspace.project(id: route.projectId) else {
+                        throw WorkstateStorageError.missingProject(route.projectId)
+                    }
+                    project = existing
+                case "new_project":
+                    project = try createProject(route: route, segment: segment, workspace: workspace)
+                default:
+                    throw WorkstateStorageError.invalidState("Unknown route action: \(route.action)")
                 }
-                let result = try runtime.steward(segment: segment, project: project, scanner: scanner)
-                summary.agentRuns += 1
-                if mode == .shadow {
-                    try appendShadow(result, segment: segment, projectID: project.id)
+
+                let result: StewardResult
+                if let persisted = record.steward {
+                    result = persisted
                 } else {
-                    try apply(result, segment: segment, project: project)
+                    try scanner.beginProcessing(segmentID: segment.id, stage: .stewarding)
+                    result = try runtime.steward(segment: segment, project: project, scanner: scanner)
+                    summary.agentRuns += 1
+                    try scanner.recordStewardResult(segmentID: segment.id, steward: result)
                 }
-                processedIDs.append(segment.id)
-                switch result.classification {
-                case "ordinary_delta": summary.changed += 1
-                case "review_required": summary.reviews += 1
-                default: summary.ignored += 1
+
+                try scanner.beginProcessing(segmentID: segment.id, stage: .applying)
+                try apply(result, segment: segment, project: project)
+                if result.classification == "ordinary_delta" {
+                    summary.changed += 1
+                } else {
+                    summary.ignored += 1
                 }
-            default:
-                throw WorkstateStorageError.invalidState("Unknown route action: \(route.action)")
+                try scanner.recordRoute(
+                    threadID: segment.threadID,
+                    turnID: segment.turnID,
+                    projectID: project.id
+                )
+                try scanner.completeProcessing(segmentID: segment.id)
+                try scanner.markProcessed(segmentIDs: [segment.id])
+                summary.processed += 1
+            } catch {
+                let currentStage = (try? scanner.processingRecord(segmentID: segment.id).stage) ?? .queued
+                try? scanner.failProcessing(
+                    segmentID: segment.id,
+                    failedStage: currentStage,
+                    error: error.localizedDescription
+                )
+                summary.failed += 1
             }
         }
 
-        try scanner.markProcessed(segmentIDs: processedIDs)
-        summary.processed = processedIDs.count
         return summary
-    }
-
-    private func isMeaningful(_ segment: SessionSegment) -> Bool {
-        let user = segment.userText.lowercased()
-        let assistant = segment.assistantText.lowercased()
-        let explicitDecisionSignals = [
-            "确认", "我同意", "就这样", "可以改", "按这个", "定下来", "拍板",
-            "confirmed", "i agree", "go ahead", "ship it"
-        ]
-        let durableOutcomeSignals = [
-            "已实现", "已修改", "已更新", "已完成", "构建通过", "测试通过", "验证通过",
-            "已发布", "已部署", "已提交", "已合并", "根因", "当前结论", "工作区状态",
-            "implemented", "updated", "completed", "build passed", "tests passed", "verified",
-            "deployed", "published", "committed", "merged", "root cause"
-        ]
-        return explicitDecisionSignals.contains(where: user.contains)
-            || durableOutcomeSignals.contains(where: assistant.contains)
-    }
-
-    private func hasAgentBudget() throws -> Bool {
-        try runtime.dailyInputTokens() + reservedInputTokensPerRun <= maxDailyInputTokens
-    }
-
-    private func deterministicRoute(
-        segment: SessionSegment,
-        workspace: WorkspaceSnapshot
-    ) -> RouteResult? {
-        let text = "\(segment.userText)\n\(segment.assistantText)".lowercased()
-        let cwd = segment.cwd.lowercased()
-        var matches: [(String, String)] = []
-
-        if cwd.contains("/documents/workstate") || text.contains("workstate") {
-            matches.append(("workstate", "明确涉及 Workstate 产品或代码"))
-        }
-        if cwd.contains("reframe_website") || text.contains("reframe 官网") || text.contains("官网项目") {
-            matches.append(("reframe-website", "明确涉及 Reframe 官网"))
-        }
-        if cwd.contains("reframe-app-material-graph")
-            || text.contains("reframe beta")
-            || text.contains("素材图谱")
-            || text.contains("storyboard")
-            || text.contains("候选池") {
-            matches.append(("reframe-beta", "明确涉及 Reframe Beta 素材图谱工作"))
-        }
-        if text.contains("v1.0 rc")
-            || text.contains("reframe rc")
-            || text.contains("多机位版本")
-            || text.contains("报告视图") {
-            matches.append(("reframe-rc", "明确涉及 Reframe V1.0 RC"))
-        }
-
-        let valid = matches.filter { workspace.project(id: $0.0) != nil }
-        let projectIDs = Set(valid.map(\.0))
-        guard projectIDs.count == 1, let match = valid.first else { return nil }
-        return RouteResult(
-            action: "existing_project",
-            projectId: match.0,
-            worklineHint: "",
-            confidence: 0.99,
-            reason: match.1
-        )
     }
 
     private func apply(_ result: StewardResult, segment: SessionSegment, project: ProjectRecord) throws {
@@ -198,41 +139,24 @@ public struct WorkstateOrchestrator: Sendable {
         let source = evidenceSource(segment)
         _ = try service.addSource(source)
 
-        if result.classification == "review_required" {
-            let kind = ReviewKind(rawValue: result.review.kind) ?? .understandingConflict
-            _ = try service.upsertReview(
-                ReviewItem(
-                    id: stableID(prefix: "review", segment: segment),
-                    kind: kind,
-                    projectID: project.id,
-                    taskID: project.task(id: result.worklineId) == nil ? nil : result.worklineId,
-                    title: result.title,
-                    summary: result.summary,
-                    reason: result.review.reason,
-                    previousValue: result.review.previousValue,
-                    proposedValue: result.review.proposedValue,
-                    proposedChanges: result.review.proposedChanges,
-                    sourceIDs: [source.id],
-                    createdAt: segment.timestamp,
-                    updatedAt: segment.timestamp
-                )
-            )
-            return
-        }
+        let taskID = try resolveWorkline(result, segment: segment, projectID: project.id, sourceID: source.id)
 
         let eventID = stableID(prefix: "delta", segment: segment)
-        if project.event(id: eventID) != nil { return }
+        let currentProject = try service.snapshot().project(id: project.id)
+        if currentProject?.event(id: eventID) != nil { return }
         guard let kind = EventKind(rawValue: result.kind),
               let stage = LoopStage(rawValue: result.stage),
               let delivery = DeliveryStage(rawValue: result.delivery) else {
             throw WorkstateStorageError.invalidState("Steward returned an unsupported state")
         }
-        let taskID = project.task(id: result.worklineId) == nil ? nil : result.worklineId
+        let completesWorkline = result.worklineAction == "complete_existing"
         _ = try service.appendEvent(
             EventInput(
                 id: eventID,
+                timestamp: segment.timestamp,
                 projectID: project.id,
                 taskID: taskID,
+                mergeTaskID: completesWorkline ? taskID : nil,
                 title: result.title,
                 summary: result.summary,
                 kind: kind,
@@ -244,6 +168,129 @@ public struct WorkstateOrchestrator: Sendable {
             )
         )
         _ = try service.appendOpenIssues(projectID: project.id, issues: result.openIssues)
+    }
+
+    private func resolveWorkline(
+        _ result: StewardResult,
+        segment: SessionSegment,
+        projectID: String,
+        sourceID: String
+    ) throws -> String? {
+        let snapshot = try service.snapshot()
+        guard let project = snapshot.project(id: projectID) else {
+            throw WorkstateStorageError.missingProject(projectID)
+        }
+
+        switch result.worklineAction {
+        case "none":
+            guard result.worklineId.isEmpty else {
+                throw WorkstateStorageError.invalidState("A no-workline delta returned a workline id")
+            }
+            return nil
+        case "continue_existing", "complete_existing", "resume_existing":
+            guard project.task(id: result.worklineId) != nil else {
+                throw WorkstateStorageError.missingTask(result.worklineId)
+            }
+            if result.worklineAction == "resume_existing" {
+                _ = try service.updateTask(
+                    id: result.worklineId,
+                    update: TaskUpdate(status: .active, stage: LoopStage(rawValue: result.stage))
+                )
+            }
+            return result.worklineId
+        case "start_new":
+            guard !result.worklineId.isEmpty,
+                  !result.worklineTitle.isEmpty,
+                  !result.worklineObjective.isEmpty else {
+                throw WorkstateStorageError.invalidState("A new workline requires id, title, and objective")
+            }
+            guard project.task(id: result.worklineId) == nil else {
+                throw WorkstateStorageError.invalidState("New workline already exists: \(result.worklineId)")
+            }
+            let branchEventID = try branchEventID(
+                parentWorklineID: result.branchFromWorklineId,
+                project: project,
+                before: segment.timestamp
+            )
+            _ = try service.startTask(
+                TaskStartInput(
+                    projectID: projectID,
+                    id: result.worklineId,
+                    title: result.worklineTitle,
+                    objective: result.worklineObjective,
+                    accent: accent(for: result.worklineId),
+                    stage: LoopStage(rawValue: result.stage) ?? .intake,
+                    branchedFromEventID: branchEventID,
+                    sourceIDs: [sourceID],
+                    timestamp: segment.timestamp,
+                    eventID: stableID(prefix: "task-start", segment: segment)
+                )
+            )
+            return result.worklineId
+        default:
+            throw WorkstateStorageError.invalidState("Unknown workline action: \(result.worklineAction)")
+        }
+    }
+
+    private func branchEventID(
+        parentWorklineID: String,
+        project: ProjectRecord,
+        before timestamp: Date
+    ) throws -> String {
+        let eligible = project.events
+            .filter { $0.timestamp <= timestamp && $0.kind != .taskStarted }
+            .sorted { $0.timestamp < $1.timestamp }
+        if parentWorklineID.isEmpty {
+            guard let event = eligible.last(where: { $0.taskID == nil }) ?? eligible.last else {
+                throw WorkstateStorageError.invalidState("Cannot start a workline without a branch event")
+            }
+            return event.id
+        }
+        guard let parent = project.task(id: parentWorklineID) else {
+            throw WorkstateStorageError.missingTask(parentWorklineID)
+        }
+        return eligible.last(where: { $0.taskID == parentWorklineID })?.id ?? parent.branchedFromEventID
+    }
+
+    private func accent(for id: String) -> ProjectAccent {
+        let accents: [ProjectAccent] = [.blue, .green, .amber, .violet, .cyan, .red]
+        let value = id.utf8.reduce(0) { ($0 + Int($1)) % accents.count }
+        return accents[value]
+    }
+
+    private func createProject(
+        route: RouteResult,
+        segment: SessionSegment,
+        workspace: WorkspaceSnapshot
+    ) throws -> ProjectRecord {
+        guard !route.projectId.isEmpty, !route.projectName.isEmpty, !route.projectSummary.isEmpty else {
+            throw WorkstateStorageError.invalidState("Router returned an incomplete new project")
+        }
+        if let existing = workspace.project(id: route.projectId) {
+            return existing
+        }
+        let source = evidenceSource(segment)
+        _ = try service.addSource(source)
+        let index = workspace.projects.count
+        let accent = ProjectAccent.allCases[index % ProjectAccent.allCases.count]
+        _ = try service.createProject(
+            ProjectCreateInput(
+                id: route.projectId,
+                name: route.projectName,
+                summary: route.projectSummary,
+                purpose: route.projectSummary,
+                accent: accent,
+                position: GraphPosition(
+                    x: 180 + Double(index % 2) * 260,
+                    y: 180 + Double(index / 2) * 180
+                ),
+                sourceIDs: [source.id]
+            )
+        )
+        guard let created = try service.snapshot().project(id: route.projectId) else {
+            throw WorkstateStorageError.missingProject(route.projectId)
+        }
+        return created
     }
 
     private func evidenceSource(_ segment: SessionSegment) -> SourceReference {
@@ -266,54 +313,4 @@ public struct WorkstateOrchestrator: Sendable {
         "\(prefix)-\(segment.threadID)-\(segment.turnID)"
     }
 
-    private func appendShadow<Result: Encodable>(
-        _ result: Result,
-        segment: SessionSegment,
-        projectID: String? = nil
-    ) throws {
-        let url = WorkstatePaths.defaultPaths().root.appendingPathComponent("shadow-proposals.jsonl")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        let record = ShadowRecord(
-            timestamp: Date(),
-            segmentID: segment.id,
-            projectID: projectID,
-            payload: try JSONValue(result)
-        )
-        var data = try WorkstateCoding.makeEncoder(pretty: false).encode(record)
-        data.append(0x0A)
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
-    }
-}
-
-private struct ShadowRecord: Codable {
-    var timestamp: Date
-    var segmentID: String
-    var projectID: String?
-    var payload: JSONValue
-}
-
-private struct JSONValue: Codable {
-    var object: [String: String]
-
-    init<Value: Encodable>(_ value: Value) throws {
-        let data = try JSONEncoder().encode(value)
-        let raw = try JSONSerialization.jsonObject(with: data)
-        guard let dictionary = raw as? [String: Any] else {
-            object = ["value": String(data: data, encoding: .utf8) ?? ""]
-            return
-        }
-        object = dictionary.mapValues { item in
-            if let string = item as? String { return string }
-            if let data = try? JSONSerialization.data(withJSONObject: item),
-               let string = String(data: data, encoding: .utf8) {
-                return string
-            }
-            return String(describing: item)
-        }
-    }
 }

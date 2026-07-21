@@ -83,9 +83,44 @@ public enum DeliveryStage: String, Codable, CaseIterable, Sendable {
 public enum ReviewKind: String, Codable, CaseIterable, Sendable {
     case ambiguousRouting
     case candidateProject
+    case projectUpdate
     case projectStructure
     case understandingConflict
     case decisionConflict
+}
+
+public struct ReviewEventProposal: Codable, Equatable, Sendable {
+    public var eventID: String
+    public var timestamp: Date
+    public var taskID: String?
+    public var kind: EventKind
+    public var stage: LoopStage
+    public var delivery: DeliveryStage
+    public var facts: [String]
+    public var openIssues: [String]
+    public var operations: OperationalContext
+
+    public init(
+        eventID: String,
+        timestamp: Date,
+        taskID: String? = nil,
+        kind: EventKind,
+        stage: LoopStage,
+        delivery: DeliveryStage,
+        facts: [String] = [],
+        openIssues: [String] = [],
+        operations: OperationalContext = .init()
+    ) {
+        self.eventID = eventID
+        self.timestamp = timestamp
+        self.taskID = taskID
+        self.kind = kind
+        self.stage = stage
+        self.delivery = delivery
+        self.facts = facts
+        self.openIssues = openIssues
+        self.operations = operations
+    }
 }
 
 public enum ReviewStatus: String, Codable, CaseIterable, Sendable {
@@ -104,6 +139,32 @@ public enum DaemonActivity: String, Codable, CaseIterable, Sendable {
     case failed
 }
 
+public enum ProjectTopicStatus: String, Codable, CaseIterable, Sendable {
+    case captured
+    case discussing
+    case converted
+    case closed
+}
+
+public enum ProjectTopicKind: String, Codable, CaseIterable, Sendable {
+    case product
+    case frontend
+    case backend
+}
+
+public enum ProjectTopicPromotionKind: String, Codable, CaseIterable, Sendable {
+    case decision
+    case task
+}
+
+public enum ProjectTopicNoteKind: String, Codable, CaseIterable, Sendable {
+    case origin
+    case ownerAnalysis
+    case userCorrection
+    case confirmation
+    case statusChange
+}
+
 public struct WorkspaceSnapshot: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var updatedAt: Date
@@ -111,16 +172,14 @@ public struct WorkspaceSnapshot: Codable, Equatable, Sendable {
     public var relations: [ProjectRelation]
     public var sources: [SourceReference]
     public var reviewInbox: [ReviewItem]
-    public var daemon: DaemonSnapshot
 
     public init(
-        schemaVersion: Int = 3,
+        schemaVersion: Int = 4,
         updatedAt: Date = Date(),
         projects: [ProjectRecord] = [],
         relations: [ProjectRelation] = [],
         sources: [SourceReference] = [],
-        reviewInbox: [ReviewItem] = [],
-        daemon: DaemonSnapshot = .init()
+        reviewInbox: [ReviewItem] = []
     ) {
         self.schemaVersion = schemaVersion
         self.updatedAt = updatedAt
@@ -128,7 +187,6 @@ public struct WorkspaceSnapshot: Codable, Equatable, Sendable {
         self.relations = relations
         self.sources = sources
         self.reviewInbox = reviewInbox
-        self.daemon = daemon
     }
 }
 
@@ -145,6 +203,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
     public var context: ProjectContext
     public var tasks: [TaskRecord]
     public var events: [ProjectEvent]
+    public var topics: [ProjectTopic]
     public var sourceIDs: [String]
 
     public init(
@@ -160,6 +219,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
         context: ProjectContext = .init(),
         tasks: [TaskRecord] = [],
         events: [ProjectEvent] = [],
+        topics: [ProjectTopic] = [],
         sourceIDs: [String] = []
     ) {
         self.id = id
@@ -174,7 +234,94 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
         self.context = context
         self.tasks = tasks
         self.events = events
+        self.topics = topics
         self.sourceIDs = sourceIDs
+    }
+}
+
+public struct ProjectTopicNote: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var timestamp: Date
+    public var kind: ProjectTopicNoteKind
+    public var title: String
+    public var detail: String
+    public var ownerMessageIDs: [String]
+    public var sourceIDs: [String]
+
+    public init(
+        id: String = UUID().uuidString.lowercased(),
+        timestamp: Date = Date(),
+        kind: ProjectTopicNoteKind,
+        title: String,
+        detail: String,
+        ownerMessageIDs: [String] = [],
+        sourceIDs: [String] = []
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.ownerMessageIDs = ownerMessageIDs
+        self.sourceIDs = sourceIDs
+    }
+}
+
+public struct ProjectTopic: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var summary: String
+    public var status: ProjectTopicStatus
+    public var kind: ProjectTopicKind
+    public var currentUnderstanding: String
+    public var proposedDirection: String
+    public var deferredReason: String
+    public var revisitTrigger: String
+    public var openQuestions: [String]
+    public var notes: [ProjectTopicNote]
+    public var sourceIDs: [String]
+    public var derivedTaskIDs: [String]
+    public var promotedDecisionID: String?
+    public var createdAt: Date
+    public var updatedAt: Date
+    public var confirmedAt: Date?
+
+    public init(
+        id: String = UUID().uuidString.lowercased(),
+        title: String,
+        summary: String,
+        status: ProjectTopicStatus = .captured,
+        kind: ProjectTopicKind = .product,
+        currentUnderstanding: String,
+        proposedDirection: String = "",
+        deferredReason: String = "",
+        revisitTrigger: String = "",
+        openQuestions: [String] = [],
+        notes: [ProjectTopicNote] = [],
+        sourceIDs: [String] = [],
+        derivedTaskIDs: [String] = [],
+        promotedDecisionID: String? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        confirmedAt: Date? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.summary = summary
+        self.status = status
+        self.kind = kind
+        self.currentUnderstanding = currentUnderstanding
+        self.proposedDirection = proposedDirection
+        self.deferredReason = deferredReason
+        self.revisitTrigger = revisitTrigger
+        self.openQuestions = openQuestions
+        self.notes = notes
+        self.sourceIDs = sourceIDs
+        self.derivedTaskIDs = derivedTaskIDs
+        self.promotedDecisionID = promotedDecisionID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.confirmedAt = confirmedAt
     }
 }
 
@@ -526,6 +673,7 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public var previousValue: String
     public var proposedValue: String
     public var proposedChanges: [String]
+    public var proposedEvent: ReviewEventProposal?
     public var sourceIDs: [String]
     public var createdAt: Date
     public var updatedAt: Date
@@ -542,6 +690,7 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
         previousValue: String = "",
         proposedValue: String = "",
         proposedChanges: [String] = [],
+        proposedEvent: ReviewEventProposal? = nil,
         sourceIDs: [String] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -557,6 +706,7 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
         self.previousValue = previousValue
         self.proposedValue = proposedValue
         self.proposedChanges = proposedChanges
+        self.proposedEvent = proposedEvent
         self.sourceIDs = sourceIDs
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -698,6 +848,10 @@ public extension ProjectRecord {
 
     func event(id: String) -> ProjectEvent? {
         events.first { $0.id == id }
+    }
+
+    func topic(id: String) -> ProjectTopic? {
+        topics.first { $0.id == id }
     }
 
     func events(for taskID: String?) -> [ProjectEvent] {

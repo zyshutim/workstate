@@ -1,5 +1,6 @@
 import Foundation
 import WorkstateCore
+import WorkstateIngestion
 
 @main
 struct WorkstateCLI {
@@ -279,6 +280,23 @@ struct WorkstateCLI {
             )
             _ = try service.reviseContext(input)
             try printJSON(service.compactProject(projectID: input.projectID))
+        case "brief-compose":
+            let composer = BriefCompositionService()
+            guard let brief = try composer.refreshLatest(
+                workspace: service.snapshot(),
+                force: arguments.hasFlag("force")
+            ) else {
+                throw CLIError.invalidOption("No activity brief is available to compose")
+            }
+            try printJSON(brief)
+        case "workline-reconcile":
+            let path = try arguments.requiredPositional(at: 0, name: "reconciliation-json")
+            let input = try WorkstateCoding.makeDecoder().decode(
+                WorklineReconciliationInput.self,
+                from: Data(contentsOf: URL(fileURLWithPath: path))
+            )
+            _ = try service.reconcileWorklines(input)
+            try printJSON(service.compactProject(projectID: input.projectID))
         default:
             throw CLIError.unknownCommand(command)
         }
@@ -317,6 +335,8 @@ struct WorkstateCLI {
               workstate home
 
             Write:
+              workstate brief-compose [--force]
+              workstate workline-reconcile <reconciliation-json>
               workstate source --id ID --kind KIND --label TEXT --locator PATH [--thread ID] [--turn ID] [--user TEXT] [--assistant TEXT] [--hash VALUE]
               workstate project-create --id ID --name TEXT --summary TEXT --x N --y N [--purpose TEXT] [--status active] [--accent blue]
               workstate project-update <id> [--name TEXT] [--summary TEXT] [--status STATUS] [--x N --y N]
@@ -391,6 +411,10 @@ private struct CLIArguments {
 
     func hasOption(_ key: String) -> Bool {
         options[key] != nil
+    }
+
+    func hasFlag(_ key: String) -> Bool {
+        flags.contains(key)
     }
 
     func optionalValues(_ key: String) -> [String]? {

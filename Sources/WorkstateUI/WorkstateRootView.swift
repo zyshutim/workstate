@@ -11,7 +11,9 @@ public struct WorkstateRootView: View {
 
     public var body: some View {
         Group {
-            if let project = model.selectedProject {
+            if model.isDailyBriefPresented {
+                DailyBriefView(model: model)
+            } else if let project = model.selectedProject {
                 ProjectWorkspaceView(project: project, model: model)
             } else {
                 ProjectGraphView(model: model)

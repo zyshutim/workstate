@@ -8,6 +8,14 @@ private struct WorkstateSnapshotFocusedProjectKey: EnvironmentKey {
     static let defaultValue: String? = nil
 }
 
+private struct WorkstateSnapshotWorkspacePageKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+private struct WorkstateSnapshotTopicIDKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
 extension EnvironmentValues {
     var workstateSnapshotRendering: Bool {
         get { self[WorkstateSnapshotRenderingKey.self] }
@@ -18,6 +26,16 @@ extension EnvironmentValues {
         get { self[WorkstateSnapshotFocusedProjectKey.self] }
         set { self[WorkstateSnapshotFocusedProjectKey.self] = newValue }
     }
+
+    var workstateSnapshotWorkspacePage: String? {
+        get { self[WorkstateSnapshotWorkspacePageKey.self] }
+        set { self[WorkstateSnapshotWorkspacePageKey.self] = newValue }
+    }
+
+    var workstateSnapshotTopicID: String? {
+        get { self[WorkstateSnapshotTopicIDKey.self] }
+        set { self[WorkstateSnapshotTopicIDKey.self] = newValue }
+    }
 }
 
 public extension View {
@@ -27,5 +45,10 @@ public extension View {
 
     func workstateSnapshotFocusedProject(_ projectID: String?) -> some View {
         environment(\.workstateSnapshotFocusedProjectID, projectID)
+    }
+
+    func workstateSnapshotWorkspace(page: String?, topicID: String? = nil) -> some View {
+        environment(\.workstateSnapshotWorkspacePage, page)
+            .environment(\.workstateSnapshotTopicID, topicID)
     }
 }

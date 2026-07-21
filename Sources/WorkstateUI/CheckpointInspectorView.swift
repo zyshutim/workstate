@@ -9,7 +9,6 @@ struct EventDetailPopover: View {
     let event: ProjectEvent
     let onSelectTaskEvent: (String) -> Void
     let onClose: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.workstateSnapshotRendering) private var snapshotRendering
 
     var body: some View {
@@ -22,16 +21,6 @@ struct EventDetailPopover: View {
 
             referenceSection
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .workstateGlassSurface(cornerRadius: 18)
-        .overlay(alignment: .topLeading) {
-            Capsule()
-                .fill(accent)
-                .frame(width: 3, height: 54)
-                .offset(x: -1, y: 72)
-                .shadow(color: accent.opacity(0.32), radius: 5)
-        }
-        .shadow(color: WorkstateTheme.shadow.opacity(colorScheme == .dark ? 0.46 : 0.20), radius: 30, y: 12)
     }
 
     private var header: some View {
@@ -69,7 +58,7 @@ struct EventDetailPopover: View {
         .padding(.trailing, 10)
         .padding(.vertical, 13)
         .frame(minHeight: 62)
-        .background(headerVeil)
+        .background(WorkstateTheme.headerVeil.opacity(0.22))
     }
 
     private var referenceSection: some View {
@@ -179,10 +168,6 @@ struct EventDetailPopover: View {
             return "\(task.currentStage.displayName) · \(task.status.displayName)"
         }
         return "项目主线 · \(event.loopStage.displayName)"
-    }
-
-    private var headerVeil: Color {
-        WorkstateTheme.headerVeil.opacity(colorScheme == .dark ? 0.22 : 0.58)
     }
 
     private var referenceBackground: Color {

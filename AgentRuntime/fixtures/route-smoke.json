@@ -5,7 +5,7 @@
     "threadID": "smoke",
     "turnID": "turn",
     "sourcePath": "/tmp/smoke.jsonl",
-    "cwd": "/Users/timshu/Documents/Workstate",
+    "cwd": "/Users/demo/Documents/Workstate",
     "userText": "Workstate 的审核箱入口应该放在项目图谱第一层。",
     "assistantText": "审核箱入口已确认为 L1 顶栏铃铛。",
     "timestamp": "2026-07-16T03:00:00Z"

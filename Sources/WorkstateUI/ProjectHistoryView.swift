@@ -4,7 +4,13 @@ import WorkstateCore
 struct ProjectWorkspaceView: View {
     let project: ProjectRecord
     @ObservedObject var model: WorkstateViewModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.workstateSnapshotWorkspacePage) private var snapshotWorkspacePage
+    @Environment(\.workstateSnapshotTopicID) private var snapshotTopicID
+    @Environment(\.workstateSnapshotRendering) private var snapshotRendering
+    @State private var page: ProjectWorkspacePage = .progress
+    @State private var selectedTopicID: String?
+    @State private var activeOwnerTopicID: String?
+    @State private var isComposerPresented = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -12,48 +18,101 @@ struct ProjectWorkspaceView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                ProjectContextSection(
-                    project: project,
-                    isExpanded: model.isContextExpanded,
-                    onToggle: model.toggleContext
-                )
+                switch displayedPage {
+                case .progress:
+                    ProjectContextSection(
+                        project: project,
+                        isExpanded: model.isContextExpanded,
+                        onToggle: model.toggleContext
+                    )
 
-                ProjectTimelineSection(
-                    project: project,
-                    isContextExpanded: model.isContextExpanded,
-                    selectedTaskID: model.selectedTaskID,
-                    selectedProjectEventID: model.selectedTaskID == nil ? model.selectedEventID : nil,
-                    onSelectTask: model.selectTask,
-                    onSelectProjectEvent: model.selectProjectEvent
-                )
+                    ProjectTimelineSection(
+                        workspace: model.workspace,
+                        project: project,
+                        liveActivity: model.liveActivity(for: project.id),
+                        isContextExpanded: model.isContextExpanded,
+                        selectedEventID: model.selectedEventID,
+                        onSelectEvent: model.selectEvent,
+                        onSelectTaskEvent: model.selectTaskEvent,
+                        onDismissEvent: model.closeEvent
+                    )
+                case .topics:
+                    ProjectTopicsPage(
+                        project: project,
+                        topics: project.topics,
+                        ownerConversation: model.ownerConversation(for: project.id),
+                        sources: model.workspace.sources,
+                        selectedTopicID: displayedSelectedTopicID,
+                        onAddTopic: { isComposerPresented = true },
+                        onDiscussTopic: beginTopicDiscussion,
+                        onPromoteTopic: { topicID, kind, title, detail in
+                            model.promoteTopic(
+                                projectID: project.id,
+                                topicID: topicID,
+                                kind: kind,
+                                title: title,
+                                detail: detail
+                            )
+                        }
+                    )
+                case .owner:
+                    ProjectOwnerChatView(
+                        project: project,
+                        activeTopic: activeOwnerTopicID.flatMap(project.topic(id:)),
+                        conversation: model.ownerConversation(for: project.id),
+                        isSending: model.ownerChatSendingProjectIDs.contains(project.id),
+                        onClearTopic: { activeOwnerTopicID = nil },
+                        onSend: {
+                            model.sendOwnerMessage(
+                                $0,
+                                projectID: project.id,
+                                topicID: activeOwnerTopicID
+                            )
+                        }
+                    )
+                }
             }
 
             utilityHeader
                 .zIndex(30)
 
-            if let event = model.selectedEvent {
+            if snapshotRendering,
+               displayedPage == .progress,
+               let eventID = model.selectedEventID,
+               let event = project.event(id: eventID) {
+                Color.black.opacity(0.24)
+                    .ignoresSafeArea()
+                    .zIndex(35)
+
                 EventDetailPopover(
                     workspace: model.workspace,
                     project: project,
-                    task: model.selectedTask,
+                    task: event.taskID.flatMap(project.task(id:)),
                     event: event,
                     onSelectTaskEvent: model.selectTaskEvent,
                     onClose: model.closeEvent
                 )
-                .frame(width: WorkstateTheme.eventPopoverWidth, height: WorkstateTheme.eventPopoverHeight)
-                .padding(.top, 58)
-                .padding(.trailing, 12)
-                .transition(
-                    .scale(scale: 0.985, anchor: .topTrailing)
-                        .combined(with: .opacity)
+                .frame(
+                    width: WorkstateTheme.eventPopoverWidth,
+                    height: WorkstateTheme.eventPopoverHeight
                 )
+                .padding(.top, 76)
+                .padding(.trailing, 22)
                 .zIndex(40)
             }
         }
-        .animation(
-            reduceMotion ? nil : .timingCurve(0.22, 1, 0.36, 1, duration: 0.24),
-            value: model.selectedEventID
-        )
+        .frame(width: WorkstateTheme.projectWidth)
+        .sheet(isPresented: $isComposerPresented) {
+            TopicComposerSheet(project: project) { topic in
+                model.saveTopic(topic, projectID: project.id)
+                selectedTopicID = topic.id
+            }
+        }
+        .onChange(of: page) { _, newValue in
+            if newValue != .topics {
+                selectedTopicID = nil
+            }
+        }
     }
 
     private var utilityHeader: some View {
@@ -61,13 +120,35 @@ struct ProjectWorkspaceView: View {
             HStack(spacing: 10) {
                 WorkspaceToolbarButton(
                     systemName: "chevron.left",
-                    accessibilityLabel: "返回项目图谱",
-                    action: model.leaveProject
+                    accessibilityLabel: selectedTopicID == nil ? "返回项目图谱" : "返回议题列表",
+                    action: navigateBack
                 )
                 .frame(width: 38, height: 38)
                 .workstateGlassSurface(cornerRadius: 14, interactive: true)
 
-                Spacer(minLength: 10)
+                Spacer(minLength: 8)
+
+                Group {
+                    if snapshotRendering {
+                        SnapshotWorkspacePicker(selectedPage: displayedPage, topicCount: project.topics.count)
+                            .frame(width: 270)
+                    } else {
+                        Picker("项目页面", selection: displayedPageBinding) {
+                            Label("进展", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath")
+                                .tag(ProjectWorkspacePage.progress)
+                            Label("议题 \(project.topics.count)", systemImage: "tray.full")
+                                .tag(ProjectWorkspacePage.topics)
+                            Label("Owner", systemImage: "person.crop.circle")
+                                .tag(ProjectWorkspacePage.owner)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                        .frame(width: 270)
+                    }
+                }
+
+                Spacer(minLength: 8)
 
                 HStack(spacing: 5) {
                     Circle()
@@ -92,8 +173,73 @@ struct ProjectWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
+    private func navigateBack() {
+        if selectedTopicID != nil {
+            selectedTopicID = nil
+        } else {
+            model.leaveProject()
+        }
+    }
+
+    private func beginTopicDiscussion(_ topicID: String) {
+        activeOwnerTopicID = topicID
+        selectedTopicID = nil
+        page = .owner
+    }
+
+    private var displayedPage: ProjectWorkspacePage {
+        switch snapshotWorkspacePage {
+        case "topics": .topics
+        case "owner": .owner
+        default: page
+        }
+    }
+
+    private var displayedPageBinding: Binding<ProjectWorkspacePage> {
+        switch snapshotWorkspacePage {
+        case "topics": .constant(.topics)
+        case "owner": .constant(.owner)
+        default: $page
+        }
+    }
+
+    private var displayedSelectedTopicID: Binding<String?> {
+        guard snapshotWorkspacePage == "topics" else { return $selectedTopicID }
+        return .constant(snapshotTopicID)
+    }
+
     private var workspaceBackground: Color {
         WorkstateTheme.workspaceBackground
+    }
+}
+
+private struct SnapshotWorkspacePicker: View {
+    let selectedPage: ProjectWorkspacePage
+    let topicCount: Int
+
+    var body: some View {
+        HStack(spacing: 2) {
+            segment("进展", page: .progress)
+            segment("议题 \(topicCount)", page: .topics)
+            segment("Owner", page: .owner)
+        }
+        .padding(2)
+        .background(
+            WorkstateTheme.primaryLabel.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: WorkstateTheme.smallCornerRadius)
+        )
+    }
+
+    private func segment(_ title: String, page: ProjectWorkspacePage) -> some View {
+        Text(title)
+            .font(WorkstateTheme.captionEmphasisFont)
+            .foregroundStyle(page == selectedPage ? WorkstateTheme.primaryLabel : WorkstateTheme.secondaryLabel)
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .background(
+                page == selectedPage ? WorkstateTheme.raisedSurfaceBackground : .clear,
+                in: RoundedRectangle(cornerRadius: 5)
+            )
     }
 }
 
@@ -350,12 +496,14 @@ private struct ContextUnderstandingSection: View {
 }
 
 private struct ProjectTimelineSection: View {
+    let workspace: WorkspaceSnapshot
     let project: ProjectRecord
+    let liveActivity: LiveProjectActivity?
     let isContextExpanded: Bool
-    let selectedTaskID: String?
-    let selectedProjectEventID: String?
-    let onSelectTask: (String) -> Void
-    let onSelectProjectEvent: (String) -> Void
+    let selectedEventID: String?
+    let onSelectEvent: (String) -> Void
+    let onSelectTaskEvent: (String) -> Void
+    let onDismissEvent: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -396,12 +544,14 @@ private struct ProjectTimelineSection: View {
                 .frame(height: 0.5)
 
             ProjectGitTimeline(
+                workspace: workspace,
                 project: project,
+                liveActivity: liveActivity,
                 isContextExpanded: isContextExpanded,
-                selectedTaskID: selectedTaskID,
-                selectedProjectEventID: selectedProjectEventID,
-                onSelectTask: onSelectTask,
-                onSelectProjectEvent: onSelectProjectEvent
+                selectedEventID: selectedEventID,
+                onSelectEvent: onSelectEvent,
+                onSelectTaskEvent: onSelectTaskEvent,
+                onDismissEvent: onDismissEvent
             )
             .frame(maxHeight: .infinity)
         }
@@ -415,16 +565,21 @@ private struct ProjectTimelineSection: View {
 }
 
 private struct ProjectGitTimeline: View {
+    let workspace: WorkspaceSnapshot
     let project: ProjectRecord
+    let liveActivity: LiveProjectActivity?
     let isContextExpanded: Bool
-    let selectedTaskID: String?
-    let selectedProjectEventID: String?
-    let onSelectTask: (String) -> Void
-    let onSelectProjectEvent: (String) -> Void
+    let selectedEventID: String?
+    let onSelectEvent: (String) -> Void
+    let onSelectTaskEvent: (String) -> Void
+    let onDismissEvent: () -> Void
     @Environment(\.workstateSnapshotRendering) private var snapshotRendering
 
     private var layout: ProjectTimelineLayout {
-        ProjectTimelineLayout(project: project)
+        ProjectTimelineLayout(
+            project: project,
+            topInset: liveActivity == nil ? 0 : WorkstateTheme.timelineRowHeight
+        )
     }
 
     var body: some View {
@@ -449,44 +604,79 @@ private struct ProjectGitTimeline: View {
     private var timelineContent: some View {
         ZStack(alignment: .topLeading) {
             TimelineBackdrop(layout: layout)
-            TimelineTaskBranches(
-                layout: layout,
-                selectedTaskID: selectedTaskID
-            )
+            TimelineBranches(project: project, layout: layout)
+
+            if let liveActivity {
+                LiveActivityNode(
+                    activity: liveActivity,
+                    accent: project.accent.color,
+                    nodeX: ProjectTimelineLayout.mainlineX,
+                    labelStartX: layout.labelStartX,
+                    contentWidth: layout.contentSize.width
+                )
+                    .position(
+                        x: layout.contentSize.width / 2,
+                        y: 58
+                    )
+            }
 
             ForEach(layout.nodes) { node in
-                if let point = layout.points[node.id] {
-                    let labelOnLeading = point.x > layout.contentSize.width * 0.56
-                    switch node.content {
-                    case .projectEvent(let event):
-                        TimelineProjectEventButton(
-                            project: project,
-                            event: event,
-                            isSelected: selectedProjectEventID == event.id,
-                            labelOnLeading: labelOnLeading,
-                            action: { onSelectProjectEvent(event.id) }
-                        )
-                        .position(
-                            x: point.x + (labelOnLeading ? -TimelineNodeLayout.centerOffset : TimelineNodeLayout.centerOffset),
-                            y: point.y
-                        )
-                    case .task(let task):
-                        TimelineTaskButton(
-                            task: task,
-                            timestamp: node.timestamp,
-                            isSelected: selectedTaskID == task.id,
-                            labelOnLeading: labelOnLeading,
-                            action: { onSelectTask(task.id) }
-                        )
-                        .position(
-                            x: point.x + (labelOnLeading ? -TimelineNodeLayout.centerOffset : TimelineNodeLayout.centerOffset),
-                            y: point.y
-                        )
-                    }
-                }
+                TimelineEventButton(
+                    workspace: workspace,
+                    project: project,
+                    event: node.event,
+                    task: node.task,
+                    isSelected: selectedEventID == node.event.id,
+                    nodeX: node.point.x,
+                    labelStartX: layout.labelStartX,
+                    contentWidth: layout.contentSize.width,
+                    onSelect: { onSelectEvent(node.event.id) },
+                    onSelectTaskEvent: onSelectTaskEvent,
+                    onDismiss: onDismissEvent
+                )
+                .position(
+                    x: layout.contentSize.width / 2,
+                    y: node.point.y
+                )
             }
         }
         .frame(width: layout.contentSize.width, height: layout.contentSize.height, alignment: .topLeading)
+    }
+}
+
+private struct LiveActivityNode: View {
+    let activity: LiveProjectActivity
+    let accent: Color
+    let nodeX: CGFloat
+    let labelStartX: CGFloat
+    let contentWidth: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(accent)
+                .frame(width: TimelineNodeLayout.hitSize, height: TimelineNodeLayout.hitSize)
+                .offset(x: nodeX - TimelineNodeLayout.hitSize / 2)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activity.title)
+                    .font(WorkstateTheme.secondaryFont.weight(.semibold))
+                    .foregroundStyle(WorkstateTheme.primaryLabel)
+                    .lineLimit(1)
+                Text("正在进行 · \(WorkstateDateText.compact(activity.updatedAt))")
+                    .font(WorkstateTheme.microFont.monospacedDigit())
+                    .foregroundStyle(accent)
+            }
+            .padding(.leading, labelStartX)
+        }
+        .frame(
+            width: contentWidth,
+            height: TimelineNodeLayout.labelHeight,
+            alignment: .leading
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("正在进行，\(activity.title)")
     }
 }
 
@@ -501,13 +691,13 @@ private struct TimelineBackdrop: View {
             context.stroke(
                 mainline,
                 with: .color(WorkstateTheme.secondaryLabel.opacity(0.34)),
-                style: StrokeStyle(lineWidth: 1.2, lineCap: .round)
+                style: StrokeStyle(lineWidth: 1, lineCap: .round)
             )
 
-            for y in layout.rowYs {
+            for y in layout.rowYs.dropLast() {
                 var row = Path()
-                row.move(to: CGPoint(x: 20, y: y + 31))
-                row.addLine(to: CGPoint(x: size.width - 20, y: y + 31))
+                row.move(to: CGPoint(x: 20, y: y + WorkstateTheme.timelineRowHeight / 2))
+                row.addLine(to: CGPoint(x: size.width - 20, y: y + WorkstateTheme.timelineRowHeight / 2))
                 context.stroke(row, with: .color(WorkstateTheme.separator.opacity(0.20)), lineWidth: 0.5)
             }
 
@@ -518,63 +708,30 @@ private struct TimelineBackdrop: View {
     }
 }
 
-private struct TimelineTaskBranches: View {
+private struct TimelineBranches: View {
+    let project: ProjectRecord
     let layout: ProjectTimelineLayout
-    let selectedTaskID: String?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Canvas { context, _ in
             for branch in layout.branches {
-                let color = branch.task.accent.color
-                let isSelected = branch.task.id == selectedTaskID
-                let path = branchPath(branch)
-
-                if isSelected {
-                    context.stroke(
-                        path,
-                        with: .color(color.opacity(0.14)),
-                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                    )
+                guard let first = branch.points.first else { continue }
+                let color = branch.task?.accent.color ?? project.accent.color
+                var path = Path()
+                path.move(to: first)
+                var previous = first
+                for point in branch.points.dropFirst() {
+                    appendCurve(from: previous, to: point, path: &path)
+                    previous = point
                 }
-
                 context.stroke(
                     path,
-                    with: .color(color.opacity(isSelected ? 0.96 : 0.72)),
-                    style: StrokeStyle(lineWidth: 1.8, lineCap: .round)
+                    with: .color(color.opacity(0.74)),
+                    style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round)
                 )
-
-                let startCap = CGRect(
-                    x: branch.startPoint.x - 2.5,
-                    y: branch.startPoint.y - 2.5,
-                    width: 5,
-                    height: 5
-                )
-                context.fill(Path(ellipseIn: startCap), with: .color(color.opacity(0.72)))
-
-                if let mergePoint = branch.mergePoint {
-                    let mergeCap = CGRect(
-                        x: mergePoint.x - 2.5,
-                        y: mergePoint.y - 2.5,
-                        width: 5,
-                        height: 5
-                    )
-                    context.fill(Path(ellipseIn: mergeCap), with: .color(color.opacity(0.72)))
-                }
             }
         }
         .allowsHitTesting(false)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: selectedTaskID)
-    }
-
-    private func branchPath(_ branch: ProjectTimelineBranch) -> Path {
-        var path = Path()
-        path.move(to: branch.startPoint)
-        appendCurve(from: branch.startPoint, to: branch.taskPoint, path: &path)
-        if let mergePoint = branch.mergePoint {
-            appendCurve(from: branch.taskPoint, to: mergePoint, path: &path)
-        }
-        return path
     }
 
     private func appendCurve(from start: CGPoint, to end: CGPoint, path: inout Path) {
@@ -587,183 +744,144 @@ private struct TimelineTaskBranches: View {
     }
 }
 
-private struct TimelineProjectEventButton: View {
+private struct TimelineEventButton: View {
+    let workspace: WorkspaceSnapshot
     let project: ProjectRecord
     let event: ProjectEvent
+    let task: TaskRecord?
     let isSelected: Bool
-    let labelOnLeading: Bool
-    let action: () -> Void
+    let nodeX: CGFloat
+    let labelStartX: CGFloat
+    let contentWidth: CGFloat
+    let onSelect: () -> Void
+    let onSelectTaskEvent: (String) -> Void
+    let onDismiss: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.workstateSnapshotRendering) private var snapshotRendering
     @State private var isHovered = false
 
+    @ViewBuilder
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: TimelineNodeLayout.spacing) {
-                if labelOnLeading {
-                    eventInfo(alignment: .trailing)
-                    eventNode
-                } else {
-                    eventNode
-                    eventInfo(alignment: .leading)
+        if snapshotRendering {
+            eventButton
+        } else {
+            eventButton
+                .popover(
+                    isPresented: detailPopoverBinding,
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .leading
+                ) {
+                    EventDetailPopover(
+                        workspace: workspace,
+                        project: project,
+                        task: task,
+                        event: event,
+                        onSelectTaskEvent: onSelectTaskEvent,
+                        onClose: dismissDetail
+                    )
+                    .frame(
+                        width: WorkstateTheme.eventPopoverWidth,
+                        height: WorkstateTheme.eventPopoverHeight
+                    )
                 }
+        }
+    }
+
+    private var eventButton: some View {
+        Button(action: selectEvent) {
+            ZStack(alignment: .leading) {
+                eventNode
+                    .offset(x: nodeX - TimelineNodeLayout.hitSize / 2)
+                eventLabel
+                    .padding(.leading, labelStartX)
             }
             .frame(
-                width: TimelineNodeLayout.width,
-                height: TimelineNodeLayout.height,
-                alignment: labelOnLeading ? .trailing : .leading
+                width: contentWidth,
+                height: TimelineNodeLayout.labelHeight,
+                alignment: .leading
             )
             .contentShape(Rectangle())
+            .background(
+                isHovered || isSelected
+                    ? nodeColor.opacity(isSelected ? 0.10 : 0.055)
+                    : Color.clear
+            )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered && !reduceMotion ? 1.012 : 1)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovered)
-        .onHover { isHovered = $0 }
-        .help(event.summary)
+        .onHover { hovering in
+            guard !isSelected else { return }
+            isHovered = hovering
+        }
     }
 
     private var eventNode: some View {
         ZStack {
             if isSelected {
                 Circle()
-                    .fill(eventColor.opacity(0.14))
-                    .frame(width: 26, height: 26)
+                    .fill(nodeColor.opacity(0.14))
+                    .frame(width: 22, height: 22)
             }
             Circle()
-                .fill(isSelected ? eventColor : WorkstateTheme.contentBackground)
-                .frame(width: 18, height: 18)
+                .fill(isSelected || task?.status == .active ? nodeColor : WorkstateTheme.contentBackground)
+                .frame(width: isHovered ? 12 : 10, height: isHovered ? 12 : 10)
                 .overlay {
                     Circle()
-                        .stroke(eventColor, lineWidth: 1.3)
+                        .stroke(nodeColor, lineWidth: 1)
                 }
-            Image(systemName: event.kind.symbol)
-                .font(.system(size: 7, weight: .bold))
-                .foregroundStyle(isSelected ? WorkstateTheme.onAccent : eventColor)
         }
-        .frame(width: TimelineNodeLayout.dotSize, height: TimelineNodeLayout.dotSize)
+        .frame(width: TimelineNodeLayout.hitSize, height: TimelineNodeLayout.hitSize)
     }
 
-    private func eventInfo(alignment: HorizontalAlignment) -> some View {
-        VStack(alignment: alignment, spacing: 3) {
+    private var eventLabel: some View {
+        VStack(alignment: .leading, spacing: 2) {
             Text(event.title)
-                .font(isSelected ? WorkstateTheme.headlineFont : WorkstateTheme.secondaryFont.weight(.medium))
-                .foregroundStyle(isSelected ? eventColor : WorkstateTheme.primaryLabel)
+                .font(WorkstateTheme.secondaryFont.weight(.semibold))
+                .foregroundStyle(WorkstateTheme.primaryLabel)
                 .lineLimit(1)
 
-            HStack(spacing: 5) {
-                Text(event.loopStage.displayName)
-                Text("·")
-                Text(WorkstateDateText.compact(event.timestamp))
-                    .monospacedDigit()
-            }
-            .font(WorkstateTheme.microFont)
-            .foregroundStyle(WorkstateTheme.secondaryLabel)
-            .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .frame(width: TimelineNodeLayout.infoWidth, alignment: alignment == .leading ? .leading : .trailing)
-        .background {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(eventColor.opacity(isSelected ? 0.09 : isHovered ? 0.05 : 0))
-        }
-    }
-
-    private var eventColor: Color {
-        project.accent.color
-    }
-}
-
-private struct TimelineTaskButton: View {
-    let task: TaskRecord
-    let timestamp: Date
-    let isSelected: Bool
-    let labelOnLeading: Bool
-    let action: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: TimelineNodeLayout.spacing) {
-                if labelOnLeading {
-                    taskInfo(alignment: .trailing)
-                    taskNode
-                } else {
-                    taskNode
-                    taskInfo(alignment: .leading)
-                }
-            }
-            .frame(
-                width: TimelineNodeLayout.width,
-                height: TimelineNodeLayout.height,
-                alignment: labelOnLeading ? .trailing : .leading
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered && !reduceMotion ? 1.012 : 1)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovered)
-        .onHover { isHovered = $0 }
-        .help(task.objective)
-    }
-
-    private var taskNode: some View {
-        ZStack {
-            if isSelected {
-                Circle()
-                    .fill(branchColor.opacity(0.14))
-                    .frame(width: 28, height: 28)
-            }
-            Circle()
-                .fill(task.status == .active ? branchColor : WorkstateTheme.contentBackground)
-                .frame(width: 18, height: 18)
-                .overlay {
-                    Circle()
-                        .stroke(branchColor, lineWidth: 1.4)
-                }
-            Image(systemName: task.status.symbol)
-                .font(.system(size: 7, weight: .bold))
-                .foregroundStyle(task.status == .active ? WorkstateTheme.onAccent : statusColor)
-        }
-        .frame(width: TimelineNodeLayout.dotSize, height: TimelineNodeLayout.dotSize)
-    }
-
-    private func taskInfo(alignment: HorizontalAlignment) -> some View {
-        VStack(alignment: alignment, spacing: 3) {
-            Text(task.title)
-                .font(isSelected ? WorkstateTheme.headlineFont : WorkstateTheme.secondaryFont.weight(.medium))
-                .foregroundStyle(isSelected ? branchColor : WorkstateTheme.primaryLabel)
-                .lineLimit(1)
-
-            Text("\(task.currentStage.displayName) · \(task.status.displayName) · \(WorkstateDateText.compact(timestamp))")
-                .font(WorkstateTheme.microFont.monospacedDigit())
+            Text(event.summary)
+                .font(WorkstateTheme.microFont)
                 .foregroundStyle(WorkstateTheme.secondaryLabel)
                 .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
+
+            Text("\(task?.title ?? "项目主线") · \(task?.status.displayName ?? event.loopStage.displayName) · \(WorkstateDateText.compact(event.timestamp))")
+                .font(WorkstateTheme.microFont.monospacedDigit())
+                .foregroundStyle(WorkstateTheme.tertiaryLabel)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .frame(width: TimelineNodeLayout.infoWidth, alignment: alignment == .leading ? .leading : .trailing)
-        .background {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(branchColor.opacity(isSelected ? 0.09 : isHovered ? 0.05 : 0))
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var branchColor: Color {
-        task.accent.color
+    private var nodeColor: Color {
+        task?.accent.color ?? project.accent.color
     }
 
-    private var statusColor: Color {
-        task.status.color(accent: task.accent)
+    private var detailPopoverBinding: Binding<Bool> {
+        Binding(
+            get: { isSelected },
+            set: { presented in
+                if !presented && isSelected {
+                    onDismiss()
+                }
+            }
+        )
+    }
+
+    private func selectEvent() {
+        isHovered = false
+        onSelect()
+    }
+
+    private func dismissDetail() {
+        isHovered = false
+        onDismiss()
     }
 }
 
 private enum TimelineNodeLayout {
-    static let width = WorkstateTheme.timelineNodeWidth
-    static let height: CGFloat = 54
-    static let dotSize: CGFloat = 26
-    static let infoWidth: CGFloat = 192
-    static let spacing: CGFloat = 8
-    static let centerOffset = (width - dotSize) / 2
+    static let hitSize: CGFloat = 28
+    static let labelWidth: CGFloat = 460
+    static let labelHeight: CGFloat = 56
+    static let labelSpacing: CGFloat = 8
 }

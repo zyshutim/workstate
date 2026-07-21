@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import WorkstateCore
+import WorkstateIngestion
 
 @MainActor
 public final class WorkstateViewModel: ObservableObject {
@@ -12,22 +13,44 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public var isReviewInboxPresented = false
     @Published public var selectedReviewID: String?
     @Published public private(set) var errorMessage: String?
+    @Published public private(set) var liveActivities: [LiveProjectActivity] = []
+    @Published public private(set) var daemonStatus = DaemonSnapshot()
+    @Published public private(set) var ownerConversations: [String: ProjectOwnerConversation] = [:]
+    @Published public private(set) var ownerChatSendingProjectIDs: Set<String> = []
+    @Published public private(set) var dailyBrief: DailyBrief?
+    @Published public private(set) var isDailyBriefPresented = false
+    @Published public private(set) var hasUnreadDailyBrief = false
 
     public let repository: WorkstateRepository
     private let service: WorkstateService
+    private let liveActivityRepository: LiveActivityRepository
+    private let daemonStatusRepository: DaemonStatusRepository
+    private let ownerConversationRepository: ProjectOwnerConversationRepository
+    private let ownerTurnRepository: ProjectOwnerTurnRepository
+    private let dailyBriefRepository: DailyBriefRepository
+    private let agentRuntime: AgentRuntimeClient
     private var lastModificationDate: Date?
 
     public init(repository: WorkstateRepository = .init()) {
         self.repository = repository
         service = WorkstateService(repository: repository)
+        liveActivityRepository = LiveActivityRepository(root: repository.paths.root)
+        daemonStatusRepository = DaemonStatusRepository(root: repository.paths.root)
+        ownerConversationRepository = ProjectOwnerConversationRepository(root: repository.paths.root)
+        ownerTurnRepository = ProjectOwnerTurnRepository(root: repository.paths.root)
+        dailyBriefRepository = DailyBriefRepository(root: repository.paths.root)
+        agentRuntime = AgentRuntimeClient(runtimeRoot: repository.paths.root)
         do {
             try repository.ensureInitialized()
             workspace = try repository.load()
             lastModificationDate = repository.modificationDate()
+            liveActivities = (try? liveActivityRepository.load().activities) ?? []
+            daemonStatus = (try? daemonStatusRepository.load()) ?? DaemonSnapshot()
         } catch {
             workspace = WorkspaceSnapshot()
             errorMessage = error.localizedDescription
         }
+        refreshLatestActivityBrief()
     }
 
     public var selectedProject: ProjectRecord? {
@@ -49,17 +72,83 @@ public final class WorkstateViewModel: ObservableObject {
         workspace.pendingReviews
     }
 
+    public func liveActivity(for projectID: String) -> LiveProjectActivity? {
+        liveActivities
+            .filter { $0.projectID == projectID }
+            .max { $0.updatedAt < $1.updatedAt }
+    }
+
     public var selectedReview: ReviewItem? {
         guard let selectedReviewID else { return pendingReviews.first }
         return workspace.reviewInbox.first { $0.id == selectedReviewID }
     }
 
     public var preferredWidth: CGFloat {
-        selectedProjectID == nil ? WorkstateTheme.graphWidth : WorkstateTheme.projectWidth
+        isDailyBriefPresented || selectedProjectID != nil
+            ? WorkstateTheme.projectWidth
+            : WorkstateTheme.graphWidth
     }
 
     public var preferredHeight: CGFloat {
-        selectedProjectID == nil ? WorkstateTheme.graphHeight : WorkstateTheme.projectHeight
+        isDailyBriefPresented || selectedProjectID != nil
+            ? WorkstateTheme.projectHeight
+            : WorkstateTheme.graphHeight
+    }
+
+    public var canShowPreviousDailyBrief: Bool {
+        adjacentDailyBriefDateKey(direction: .previous) != nil
+    }
+
+    public var canShowNextDailyBrief: Bool {
+        adjacentDailyBriefDateKey(direction: .next) != nil
+    }
+
+    public func presentDailyBrief() {
+        do {
+            let briefs = try dailyBriefRepository.synchronize(
+                workspace: workspace,
+                through: Date(),
+                calendar: .current
+            )
+            dailyBrief = briefs.last
+            isDailyBriefPresented = true
+            if let brief = dailyBrief {
+                try dailyBriefRepository.markViewed(brief)
+            }
+            refreshUnreadDailyBrief()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func closeDailyBrief() {
+        isDailyBriefPresented = false
+    }
+
+    public func showPreviousDailyBrief() {
+        showAdjacentDailyBrief(direction: .previous)
+    }
+
+    public func showNextDailyBrief() {
+        showAdjacentDailyBrief(direction: .next)
+    }
+
+    public func openDailyBriefItem(_ item: DailyBriefItem) {
+        guard workspace.project(id: item.projectID) != nil else { return }
+        isDailyBriefPresented = false
+        selectProject(item.projectID)
+        if let eventID = item.eventID {
+            selectEvent(eventID)
+        } else if let taskID = item.taskID {
+            selectTask(taskID)
+        }
+    }
+
+    public func openDailyBriefProject(_ projectID: String) {
+        guard workspace.project(id: projectID) != nil else { return }
+        isDailyBriefPresented = false
+        selectProject(projectID)
     }
 
     public func selectProject(_ id: String) {
@@ -67,6 +156,7 @@ public final class WorkstateViewModel: ObservableObject {
         selectedTaskID = nil
         selectedEventID = nil
         isContextExpanded = false
+        loadOwnerConversation(projectID: id)
     }
 
     public func leaveProject() {
@@ -155,7 +245,200 @@ public final class WorkstateViewModel: ObservableObject {
         }
     }
 
+    public func ownerConversation(for projectID: String) -> ProjectOwnerConversation {
+        ownerConversations[projectID] ?? ProjectOwnerConversation(projectID: projectID)
+    }
+
+    public func sendOwnerMessage(_ rawMessage: String, projectID: String, topicID: String? = nil) {
+        let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty,
+              !ownerChatSendingProjectIDs.contains(projectID),
+              let project = workspace.project(id: projectID) else {
+            return
+        }
+
+        let priorConversation = ownerConversation(for: projectID)
+        var pendingConversation = priorConversation
+        let turnID = UUID().uuidString.lowercased()
+        let userMessage = ProjectOwnerMessage(role: .user, text: message, topicID: topicID)
+        pendingConversation.messages.append(userMessage)
+        pendingConversation.updatedAt = Date()
+
+        do {
+            try ownerConversationRepository.save(pendingConversation)
+            try ownerTurnRepository.append(
+                ProjectOwnerTurnRecord(
+                    id: turnID,
+                    projectID: projectID,
+                    topicID: topicID,
+                    userMessageID: userMessage.id,
+                    status: .pending
+                )
+            )
+            ownerConversations[projectID] = pendingConversation
+            ownerChatSendingProjectIDs.insert(projectID)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
+        let runtime = agentRuntime
+        Task { [weak self] in
+            do {
+                let response = try await Task.detached(priority: .userInitiated) {
+                    try runtime.ownerChat(
+                        project: project,
+                        history: Array(priorConversation.messages.suffix(16)),
+                        message: message,
+                        activeTopicID: topicID
+                    )
+                }.value
+                guard let self else { return }
+                let ownerMessage = ProjectOwnerMessage(role: .owner, text: response.reply, topicID: topicID)
+                try self.applyOwnerTopicUpdates(
+                    response.topicUpdates,
+                    projectID: projectID,
+                    activeTopicID: topicID,
+                    userMessageID: userMessage.id,
+                    ownerMessageID: ownerMessage.id
+                )
+                var completedConversation = self.ownerConversation(for: projectID)
+                completedConversation.messages.append(ownerMessage)
+                completedConversation.updatedAt = Date()
+                try self.ownerConversationRepository.save(completedConversation)
+                try self.ownerTurnRepository.append(
+                    ProjectOwnerTurnRecord(
+                        id: turnID,
+                        projectID: projectID,
+                        topicID: topicID,
+                        userMessageID: userMessage.id,
+                        ownerMessageID: ownerMessage.id,
+                        status: .applied,
+                        runtimeThreadID: response.runtimeThreadID
+                    )
+                )
+                self.ownerConversations[projectID] = completedConversation
+                self.ownerChatSendingProjectIDs.remove(projectID)
+                self.errorMessage = nil
+            } catch {
+                guard let self else { return }
+                try? self.ownerTurnRepository.append(
+                    ProjectOwnerTurnRecord(
+                        id: turnID,
+                        projectID: projectID,
+                        topicID: topicID,
+                        userMessageID: userMessage.id,
+                        status: .failed,
+                        error: error.localizedDescription
+                    )
+                )
+                self.ownerChatSendingProjectIDs.remove(projectID)
+                self.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func saveTopic(_ topic: ProjectTopic, projectID: String) {
+        do {
+            workspace = try service.upsertTopic(
+                projectID: projectID,
+                input: ProjectTopicUpdateInput(
+                    id: topic.id,
+                    title: topic.title,
+                    summary: topic.summary,
+                    status: topic.status,
+                    kind: topic.kind,
+                    currentUnderstanding: topic.currentUnderstanding,
+                    proposedDirection: topic.proposedDirection,
+                    deferredReason: topic.deferredReason,
+                    revisitTrigger: topic.revisitTrigger,
+                    openQuestions: topic.openQuestions,
+                    note: topic.notes.first,
+                    sourceIDs: topic.sourceIDs
+                )
+            )
+            lastModificationDate = repository.modificationDate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func promoteTopic(
+        projectID: String,
+        topicID: String,
+        kind: ProjectTopicPromotionKind,
+        title: String,
+        detail: String
+    ) {
+        do {
+            workspace = try service.promoteTopic(
+                ProjectTopicPromotionInput(
+                    projectID: projectID,
+                    topicID: topicID,
+                    kind: kind,
+                    title: title,
+                    detail: detail
+                )
+            )
+            lastModificationDate = repository.modificationDate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func applyOwnerTopicUpdates(
+        _ updates: [ProjectOwnerTopicUpdate],
+        projectID: String,
+        activeTopicID: String?,
+        userMessageID: String,
+        ownerMessageID: String
+    ) throws {
+        for update in updates {
+            guard update.action == "create" || update.action == "update",
+                  let status = ProjectTopicStatus(rawValue: update.status),
+                  let kind = ProjectTopicKind(rawValue: update.kind),
+                  let noteKind = ProjectTopicNoteKind(rawValue: update.noteKind) else {
+                throw WorkstateStorageError.invalidState("Owner returned an unsupported topic update")
+            }
+            if let activeTopicID, update.topicId != activeTopicID {
+                throw WorkstateStorageError.invalidState("Owner tried to update a topic outside the active discussion")
+            }
+            let existing = workspace.project(id: projectID)?.topic(id: update.topicId)
+            guard (update.action == "create" && existing == nil)
+                    || (update.action == "update" && existing != nil) else {
+                throw WorkstateStorageError.invalidState("Owner topic action does not match current project state")
+            }
+            workspace = try service.upsertTopic(
+                projectID: projectID,
+                input: ProjectTopicUpdateInput(
+                    id: update.topicId,
+                    title: update.title,
+                    summary: update.summary,
+                    status: status,
+                    kind: kind,
+                    currentUnderstanding: update.currentUnderstanding,
+                    proposedDirection: update.proposedDirection,
+                    deferredReason: update.deferredReason,
+                    revisitTrigger: update.revisitTrigger,
+                    openQuestions: update.openQuestions,
+                    note: ProjectTopicNote(
+                        kind: noteKind,
+                        title: update.noteTitle,
+                        detail: update.noteDetail,
+                        ownerMessageIDs: [userMessageID, ownerMessageID]
+                    )
+                )
+            )
+            lastModificationDate = repository.modificationDate()
+        }
+    }
+
     public func reload(force: Bool = false) {
+        reloadLiveActivities()
+        reloadDaemonStatus()
         let modificationDate = repository.modificationDate()
         guard force || modificationDate != lastModificationDate else { return }
         do {
@@ -163,6 +446,116 @@ public final class WorkstateViewModel: ObservableObject {
             lastModificationDate = modificationDate
             errorMessage = nil
             repairSelection()
+            refreshLatestActivityBrief()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshLatestActivityBrief() {
+        do {
+            let briefs = try availableNarrativeBriefs()
+            let latest = briefs.last
+            if isDailyBriefPresented, let selectedDateKey = dailyBrief?.dateKey {
+                dailyBrief = briefs.first(where: { $0.dateKey == selectedDateKey }) ?? latest
+            } else {
+                dailyBrief = latest
+            }
+            if let latest {
+                hasUnreadDailyBrief = try dailyBriefRepository.isUnread(latest)
+            } else {
+                hasUnreadDailyBrief = false
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshUnreadDailyBrief() {
+        do {
+            guard let latest = try latestStoredDailyBrief() else {
+                hasUnreadDailyBrief = false
+                return
+            }
+            hasUnreadDailyBrief = try dailyBriefRepository.isUnread(latest)
+        } catch {
+            hasUnreadDailyBrief = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func latestStoredDailyBrief() throws -> DailyBrief? {
+        try availableNarrativeBriefs().last
+    }
+
+    private func availableNarrativeBriefs() throws -> [DailyBrief] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard let latestAllowedDay = calendar.date(byAdding: .day, value: -1, to: today) else {
+            return []
+        }
+        let components = calendar.dateComponents([.year, .month, .day], from: latestAllowedDay)
+        let latestAllowedKey = String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+        return try dailyBriefRepository.availableDateKeys()
+            .filter { $0 <= latestAllowedKey }
+            .compactMap { try dailyBriefRepository.load(dateKey: $0) }
+            .filter { $0.currentNarrative != nil }
+    }
+
+    private enum DailyBriefDirection {
+        case previous
+        case next
+    }
+
+    private func adjacentDailyBriefDateKey(direction: DailyBriefDirection) -> String? {
+        guard let current = dailyBrief?.dateKey,
+              let keys = try? availableNarrativeBriefs().map(\.dateKey) else {
+            return nil
+        }
+        switch direction {
+        case .previous:
+            return keys.last(where: { $0 < current })
+        case .next:
+            return keys.first(where: { $0 > current })
+        }
+    }
+
+    private func showAdjacentDailyBrief(direction: DailyBriefDirection) {
+        guard let dateKey = adjacentDailyBriefDateKey(direction: direction) else { return }
+        do {
+            guard let brief = try dailyBriefRepository.load(dateKey: dateKey) else { return }
+            dailyBrief = brief
+            try dailyBriefRepository.markViewed(brief)
+            refreshUnreadDailyBrief()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func reloadLiveActivities() {
+        guard let snapshot = try? liveActivityRepository.load(),
+              snapshot.activities != liveActivities else {
+            return
+        }
+        liveActivities = snapshot.activities
+    }
+
+    private func reloadDaemonStatus() {
+        guard let snapshot = try? daemonStatusRepository.load(), snapshot != daemonStatus else {
+            return
+        }
+        daemonStatus = snapshot
+    }
+
+    private func loadOwnerConversation(projectID: String) {
+        do {
+            ownerConversations[projectID] = try ownerConversationRepository.load(projectID: projectID)
         } catch {
             errorMessage = error.localizedDescription
         }

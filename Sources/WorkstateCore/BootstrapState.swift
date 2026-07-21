@@ -14,22 +14,22 @@ public enum WorkstateBootstrap {
             id: "source-codex-multicam",
             kind: "conversation",
             label: "Codex · Reframe 多机位前端修改",
-            locator: "codex://threads/019e484c-f52f-7270-9ae1-8270780dc74b",
-            threadID: "019e484c-f52f-7270-9ae1-8270780dc74b"
+            locator: "codex://threads/demo-multicam-session",
+            threadID: "demo-multicam-session"
         )
         let materialSession = SourceReference(
             id: "source-codex-material",
             kind: "conversation",
             label: "Codex · Reframe 素材图谱/agent 实验",
-            locator: "codex://threads/019ed4ba-92b3-7632-978e-4272a3b8a251",
-            threadID: "019ed4ba-92b3-7632-978e-4272a3b8a251"
+            locator: "codex://threads/demo-material-session",
+            threadID: "demo-material-session"
         )
         let reviewSource = SourceReference(
             id: "source-codex-review-demo",
             kind: "conversation",
             label: "Codex · Storyboard 产品定位讨论",
-            locator: "codex://threads/019ed4ba-92b3-7632-978e-4272a3b8a251",
-            threadID: "019ed4ba-92b3-7632-978e-4272a3b8a251",
+            locator: "codex://threads/demo-material-session",
+            threadID: "demo-material-session",
             turnIDs: ["review-demo"],
             excerpt: [
                 ConversationMessage(
@@ -51,31 +51,31 @@ public enum WorkstateBootstrap {
             id: "source-spec-global",
             kind: "file",
             label: "Reframe 全局规范",
-            locator: "/Users/timshu/Documents/reframe-docs/00-全局规范.md"
+            locator: "/Users/demo/Documents/reframe-docs/00-全局规范.md"
         )
         let moduleASpec = SourceReference(
             id: "source-spec-a",
             kind: "file",
             label: "模块 A · 内容理解",
-            locator: "/Users/timshu/Documents/reframe-docs/02-模块A-内容理解.md"
+            locator: "/Users/demo/Documents/reframe-docs/02-模块A-内容理解.md"
         )
         let moduleBSpec = SourceReference(
             id: "source-spec-b",
             kind: "file",
             label: "模块 B · 视频预览",
-            locator: "/Users/timshu/Documents/reframe-docs/03-模块B-视频预览.md"
+            locator: "/Users/demo/Documents/reframe-docs/03-模块B-视频预览.md"
         )
         let moduleCSpec = SourceReference(
             id: "source-spec-c",
             kind: "file",
             label: "模块 C · 粗剪",
-            locator: "/Users/timshu/Documents/reframe-docs/01-模块C-粗剪.md"
+            locator: "/Users/demo/Documents/reframe-docs/01-模块C-粗剪.md"
         )
         let reframeRepository = SourceReference(
             id: "source-reframe-repo",
             kind: "repository",
             label: "Reframe App",
-            locator: "/Users/timshu/Documents/reframe-app"
+            locator: "/Users/demo/Documents/reframe-app"
         )
 
         let multicamStart = days(-36)
@@ -183,8 +183,8 @@ public enum WorkstateBootstrap {
                 parentEventIDs: ["mc-preview-start"],
                 facts: ["activePlaybackSource 只改变蓝框", "moduleBPreviewMode 决定 B 实际显示内容"],
                 operations: .init(
-                    cwd: "/Users/timshu/Documents/reframe-app",
-                    repository: "/Users/timshu/Documents/reframe-app",
+                    cwd: "/Users/demo/Documents/reframe-app",
+                    repository: "/Users/demo/Documents/reframe-app",
                     branch: "dev-frontend",
                     files: ["src/views/ProjectMultiCamera.vue"]
                 ),
@@ -232,8 +232,8 @@ public enum WorkstateBootstrap {
                 loopStage: .implementation,
                 parentEventIDs: ["mc-preview-confirmed"],
                 operations: .init(
-                    cwd: "/Users/timshu/Documents/reframe-app",
-                    repository: "/Users/timshu/Documents/reframe-app",
+                    cwd: "/Users/demo/Documents/reframe-app",
+                    repository: "/Users/demo/Documents/reframe-app",
                     branch: "dev-frontend",
                     files: ["src/views/ProjectMultiCamera.vue"]
                 ),
@@ -297,8 +297,8 @@ public enum WorkstateBootstrap {
                 loopStage: .implementation,
                 parentEventIDs: ["mc-matrix-start"],
                 operations: .init(
-                    cwd: "/Users/timshu/Documents/reframe-app",
-                    repository: "/Users/timshu/Documents/reframe-app",
+                    cwd: "/Users/demo/Documents/reframe-app",
+                    repository: "/Users/demo/Documents/reframe-app",
                     files: ["src/features/multi-camera-timeline/components/VideoPreviewPanel.vue"]
                 ),
                 delivery: .init(stage: .changed),
@@ -360,8 +360,8 @@ public enum WorkstateBootstrap {
                 loopStage: .implementation,
                 parentEventIDs: ["mc-source-audit"],
                 operations: .init(
-                    cwd: "/Users/timshu/Documents/reframe-app",
-                    repository: "/Users/timshu/Documents/reframe-app",
+                    cwd: "/Users/demo/Documents/reframe-app",
+                    repository: "/Users/demo/Documents/reframe-app",
                     files: ["src/views/ProjectMultiCamera.vue", "src/features/multi-camera-timeline/components/MultiCameraDetailPanel.vue"]
                 ),
                 delivery: .init(stage: .changed),
@@ -783,8 +783,7 @@ public enum WorkstateBootstrap {
                     createdAt: days(-1),
                     updatedAt: days(-1)
                 )
-            ],
-            daemon: DaemonSnapshot(activity: .idle, lastScanAt: now, detail: "正在监听 Codex 会话")
+            ]
         )
     }
 }

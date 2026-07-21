@@ -93,18 +93,6 @@ struct ProjectGraphView: View {
                 graphTopBar(in: proxy.size, scale: restingScale)
                     .zIndex(100)
 
-                if model.isReviewInboxPresented {
-                    ReviewInboxPopover(model: model)
-                        .frame(width: 560, height: 590)
-                        .padding(.top, 58)
-                        .padding(.horizontal, 20)
-                        .transition(
-                            .scale(scale: 0.985, anchor: .topTrailing)
-                                .combined(with: .opacity)
-                        )
-                        .zIndex(120)
-                }
-
                 graphFooter
                     .zIndex(100)
             }
@@ -142,18 +130,27 @@ struct ProjectGraphView: View {
                 Spacer(minLength: 12)
 
                 HStack(spacing: 3) {
-                    DaemonStatusIndicator(daemon: model.workspace.daemon)
+                    ZStack(alignment: .topTrailing) {
+                        GraphToolbarButton(
+                            systemName: "clock.arrow.circlepath",
+                            accessibilityLabel: "打开工作摘要",
+                            action: model.presentDailyBrief
+                        )
+                        if model.hasUnreadDailyBrief {
+                            Circle()
+                                .fill(WorkstateTheme.activeState)
+                                .frame(width: 6, height: 6)
+                                .offset(x: -3, y: 3)
+                                .accessibilityHidden(true)
+                        }
+                    }
+
+                    DaemonStatusIndicator(daemon: model.daemonStatus)
 
                     Text(WorkstateDateText.relative(model.workspace.updatedAt))
                         .font(WorkstateTheme.captionFont.monospacedDigit())
                         .foregroundStyle(WorkstateTheme.secondaryLabel)
                         .padding(.horizontal, 7)
-
-                    ReviewInboxButton(
-                        count: model.pendingReviews.count,
-                        isPresented: model.isReviewInboxPresented,
-                        action: model.toggleReviewInbox
-                    )
 
                     GraphToolbarButton(
                         systemName: "minus.magnifyingglass",
@@ -464,11 +461,6 @@ private struct DaemonStatusIndicator: View {
                             .frame(width: 13, height: 13)
                     }
                 }
-            if let tokens = daemon.dailyInputTokens, tokens > 0 {
-                Text("\(tokens / 1_000)k")
-                    .font(WorkstateTheme.microFont.monospacedDigit())
-                    .foregroundStyle(WorkstateTheme.secondaryLabel)
-            }
         }
             .frame(minWidth: 22, minHeight: 28)
             .help(helpText)
@@ -494,44 +486,7 @@ private struct DaemonStatusIndicator: View {
         case .paused: state = "同步已暂停"
         case .failed: state = "同步发生错误"
         }
-        let usage = daemon.dailyInputTokens.map { used in
-            daemon.dailyInputTokenLimit.map { " · Token \(used)/\($0)" } ?? " · Token \(used)"
-        } ?? ""
-        return (daemon.detail.isEmpty ? state : "\(state) · \(daemon.detail)") + usage
-    }
-}
-
-private struct ReviewInboxButton: View {
-    let count: Int
-    let isPresented: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: count > 0 ? "bell.fill" : "bell")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(count > 0 ? WorkstateTheme.warning : WorkstateTheme.secondaryLabel)
-                    .frame(width: 28, height: 28)
-                    .background {
-                        Circle()
-                            .fill(WorkstateTheme.primaryLabel.opacity(isPresented ? 0.09 : 0))
-                    }
-
-                if count > 0 {
-                    Text(count > 9 ? "9+" : "\(count)")
-                        .font(.system(size: 7, weight: .bold))
-                        .foregroundStyle(WorkstateTheme.onAccent)
-                        .padding(.horizontal, 3)
-                        .frame(minWidth: 13, minHeight: 13)
-                        .background(WorkstateTheme.danger, in: Capsule())
-                        .offset(x: 3, y: -2)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .help(count > 0 ? "\(count) 条待确认" : "没有待确认内容")
-        .accessibilityLabel(count > 0 ? "\(count) 条待确认" : "没有待确认内容")
+        return daemon.detail.isEmpty ? state : "\(state) · \(daemon.detail)"
     }
 }
 

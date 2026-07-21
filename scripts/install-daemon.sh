@@ -9,6 +9,16 @@ INSTALL_DIR="$HOME/Library/Application Support/Workstate"
 DAEMON="$INSTALL_DIR/bin/workstate-daemon"
 RUNTIME_DIR="$INSTALL_DIR/AgentRuntime"
 DOMAIN="gui/$UID"
+START_AFTER_INSTALL=false
+
+if [[ "${1:-}" == "--start" ]]; then
+  START_AFTER_INSTALL=true
+elif [[ $# -gt 0 ]]; then
+  printf 'usage: %s [--start]\n' "$0" >&2
+  exit 2
+fi
+
+launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || true
 
 if [[ ! -d "$ROOT_DIR/AgentRuntime/node_modules" ]]; then
   npm install --prefix "$ROOT_DIR/AgentRuntime"
@@ -43,15 +53,13 @@ cat > "$PLIST" <<PLIST
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>WORKSTATE_AUTOMATION_MODE</key>
-    <string>shadow</string>
     <key>WORKSTATE_AGENT_RUNTIME</key>
     <string>$RUNTIME_DIR/dist/index.js</string>
   </dict>
   <key>RunAtLoad</key>
-  <true/>
+  <false/>
   <key>KeepAlive</key>
-  <true/>
+  <false/>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
@@ -63,7 +71,8 @@ cat > "$PLIST" <<PLIST
 PLIST
 
 plutil -lint "$PLIST" >/dev/null
-launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$PLIST"
-launchctl kickstart -k "$DOMAIN/$LABEL"
+if [[ "$START_AFTER_INSTALL" == true ]]; then
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  launchctl kickstart -k "$DOMAIN/$LABEL"
+fi
 printf '%s\n' "$PLIST"

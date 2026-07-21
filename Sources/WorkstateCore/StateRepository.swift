@@ -67,21 +67,21 @@ public struct WorkstateRepository: Sendable {
                 try validate(snapshot)
                 try writeUnlocked(snapshot)
                 try appendMutationUnlocked(
-                    WorkspaceMutation(kind: "workspace.bootstrap", summary: "Initialized Workstate schema v2")
+                    WorkspaceMutation(kind: "workspace.bootstrap", summary: "Initialized Workstate schema v4")
                 )
             }
             return
         }
 
         let version = try schemaVersion(at: paths.state)
-        guard version != 3 else { return }
-        guard version == 1 || version == 2 else {
+        guard version != 4 else { return }
+        guard version == 1 || version == 2 || version == 3 else {
             throw WorkstateStorageError.invalidState("Unsupported schema version \(version)")
         }
 
         _ = try withLock(exclusive: true) {
             let currentVersion = try schemaVersion(at: paths.state)
-            guard currentVersion != 3 else { return }
+            guard currentVersion != 4 else { return }
             let stamp = Int(Date().timeIntervalSince1970)
             let stateBackup = paths.root.appendingPathComponent("state-v\(currentVersion)-backup-\(stamp).json")
             try FileManager.default.copyItem(at: paths.state, to: stateBackup)
@@ -89,7 +89,9 @@ public struct WorkstateRepository: Sendable {
                 let eventsBackup = paths.root.appendingPathComponent("events-v\(currentVersion)-backup-\(stamp).jsonl")
                 try FileManager.default.copyItem(at: paths.events, to: eventsBackup)
             }
-            if currentVersion == 2 {
+            if currentVersion == 3 {
+                try migrateV3StateUnlocked()
+            } else if currentVersion == 2 {
                 try migrateV2StateUnlocked()
             } else {
                 let snapshot = initial ?? WorkstateBootstrap.makeInitialState()
@@ -99,7 +101,7 @@ public struct WorkstateRepository: Sendable {
             try appendMutationUnlocked(
                 WorkspaceMutation(
                     kind: "workspace.migrate",
-                    summary: "Archived schema v\(currentVersion) and initialized Workstate schema v3"
+                    summary: "Archived schema v\(currentVersion) and initialized Workstate schema v4"
                 )
             )
         }
@@ -168,8 +170,8 @@ public struct WorkstateRepository: Sendable {
     }
 
     private func validate(_ snapshot: WorkspaceSnapshot) throws {
-        guard snapshot.schemaVersion == 3 else {
-            throw WorkstateStorageError.invalidState("Expected schema version 3")
+        guard snapshot.schemaVersion == 4 else {
+            throw WorkstateStorageError.invalidState("Expected schema version 4")
         }
 
         let sourceIDs = Set(snapshot.sources.map(\.id))
@@ -223,6 +225,10 @@ public struct WorkstateRepository: Sendable {
             guard revisionIDs.count == project.context.revisions.count else {
                 throw WorkstateStorageError.invalidState("Duplicate context revision id in \(project.id)")
             }
+            let topicIDs = Set(project.topics.map(\.id))
+            guard topicIDs.count == project.topics.count else {
+                throw WorkstateStorageError.invalidState("Duplicate topic id in \(project.id)")
+            }
 
             for statement in project.context.understanding {
                 try validateSourceIDs(statement.sourceIDs, known: sourceIDs, owner: "statement \(statement.id)")
@@ -238,6 +244,19 @@ public struct WorkstateRepository: Sendable {
                     throw WorkstateStorageError.invalidState("Task \(task.id) has an unknown merge event")
                 }
                 try validateSourceIDs(task.sourceIDs, known: sourceIDs, owner: "task \(task.id)")
+            }
+            for topic in project.topics {
+                try validateSourceIDs(topic.sourceIDs, known: sourceIDs, owner: "topic \(topic.id)")
+                for note in topic.notes {
+                    try validateSourceIDs(note.sourceIDs, known: sourceIDs, owner: "topic note \(note.id)")
+                }
+                for taskID in topic.derivedTaskIDs where !taskIDs.contains(taskID) {
+                    throw WorkstateStorageError.invalidState("Topic \(topic.id) references unknown task \(taskID)")
+                }
+                if let decisionID = topic.promotedDecisionID,
+                   !project.context.acceptedDecisions.contains(where: { $0.id == decisionID }) {
+                    throw WorkstateStorageError.invalidState("Topic \(topic.id) references unknown decision \(decisionID)")
+                }
             }
             for event in project.events {
                 if let taskID = event.taskID, !taskIDs.contains(taskID) {
@@ -266,16 +285,13 @@ public struct WorkstateRepository: Sendable {
             throw WorkstateStorageError.invalidState("Schema v2 state is not a JSON object")
         }
 
-        root["schemaVersion"] = 3
+        root["schemaVersion"] = 4
         root["reviewInbox"] = []
-        root["daemon"] = [
-            "activity": DaemonActivity.stopped.rawValue,
-            "pendingEvidenceCount": 0,
-            "detail": ""
-        ]
+        root.removeValue(forKey: "daemon")
 
         if var projects = root["projects"] as? [[String: Any]] {
             for index in projects.indices {
+                projects[index]["topics"] = projects[index]["topics"] ?? []
                 guard var context = projects[index]["context"] as? [String: Any] else { continue }
                 context["objectModel"] = context["objectModel"] ?? []
                 context["acceptedDecisions"] = context["acceptedDecisions"] ?? []
@@ -296,6 +312,28 @@ public struct WorkstateRepository: Sendable {
             root["sources"] = sources
         }
 
+        let migratedData = try JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        let snapshot = try WorkstateCoding.makeDecoder().decode(WorkspaceSnapshot.self, from: migratedData)
+        try validate(snapshot)
+        try writeUnlocked(snapshot)
+    }
+
+    private func migrateV3StateUnlocked() throws {
+        let data = try Data(contentsOf: paths.state)
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw WorkstateStorageError.invalidState("Schema v3 state is not a JSON object")
+        }
+        root["schemaVersion"] = 4
+        root.removeValue(forKey: "daemon")
+        if var projects = root["projects"] as? [[String: Any]] {
+            for index in projects.indices {
+                projects[index]["topics"] = projects[index]["topics"] ?? []
+            }
+            root["projects"] = projects
+        }
         let migratedData = try JSONSerialization.data(
             withJSONObject: root,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

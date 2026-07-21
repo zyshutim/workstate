@@ -16,7 +16,9 @@ let package = Package(
         .executable(name: "WorkstatePreview", targets: ["WorkstatePreview"]),
         .executable(name: "WorkstateChecks", targets: ["WorkstateChecks"]),
         .executable(name: "WorkstateSnapshot", targets: ["WorkstateSnapshot"]),
-        .executable(name: "WorkstateDaemon", targets: ["WorkstateDaemon"])
+        .executable(name: "WorkstateDaemon", targets: ["WorkstateDaemon"]),
+        .executable(name: "WorkstateRebuild", targets: ["WorkstateRebuild"]),
+        .executable(name: "WorkstateMigrateV4", targets: ["WorkstateMigrateV4"])
     ],
     targets: [
         .target(name: "WorkstateCore"),
@@ -26,7 +28,7 @@ let package = Package(
         ),
         .target(
             name: "WorkstateUI",
-            dependencies: ["WorkstateCore"]
+            dependencies: ["WorkstateCore", "WorkstateIngestion"]
         ),
         .executableTarget(
             name: "WorkstateApp",
@@ -34,7 +36,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "WorkstateCLI",
-            dependencies: ["WorkstateCore"]
+            dependencies: ["WorkstateCore", "WorkstateIngestion"]
         ),
         .executableTarget(
             name: "WorkstatePreview",
@@ -50,6 +52,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "WorkstateDaemon",
+            dependencies: ["WorkstateCore", "WorkstateIngestion"]
+        ),
+        .executableTarget(
+            name: "WorkstateRebuild",
+            dependencies: ["WorkstateCore", "WorkstateIngestion"]
+        ),
+        .executableTarget(
+            name: "WorkstateMigrateV4",
             dependencies: ["WorkstateCore", "WorkstateIngestion"]
         )
     ]

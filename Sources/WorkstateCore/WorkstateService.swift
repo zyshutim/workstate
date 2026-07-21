@@ -75,6 +75,71 @@ public struct ProjectModelUpdate: Sendable {
     }
 }
 
+public struct ProjectTopicUpdateInput: Sendable {
+    public var id: String
+    public var title: String
+    public var summary: String
+    public var status: ProjectTopicStatus
+    public var kind: ProjectTopicKind
+    public var currentUnderstanding: String
+    public var proposedDirection: String
+    public var deferredReason: String
+    public var revisitTrigger: String
+    public var openQuestions: [String]
+    public var note: ProjectTopicNote?
+    public var sourceIDs: [String]
+
+    public init(
+        id: String,
+        title: String,
+        summary: String,
+        status: ProjectTopicStatus,
+        kind: ProjectTopicKind,
+        currentUnderstanding: String,
+        proposedDirection: String = "",
+        deferredReason: String = "",
+        revisitTrigger: String = "",
+        openQuestions: [String] = [],
+        note: ProjectTopicNote? = nil,
+        sourceIDs: [String] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.summary = summary
+        self.status = status
+        self.kind = kind
+        self.currentUnderstanding = currentUnderstanding
+        self.proposedDirection = proposedDirection
+        self.deferredReason = deferredReason
+        self.revisitTrigger = revisitTrigger
+        self.openQuestions = openQuestions
+        self.note = note
+        self.sourceIDs = sourceIDs
+    }
+}
+
+public struct ProjectTopicPromotionInput: Sendable {
+    public var projectID: String
+    public var topicID: String
+    public var kind: ProjectTopicPromotionKind
+    public var title: String
+    public var detail: String
+
+    public init(
+        projectID: String,
+        topicID: String,
+        kind: ProjectTopicPromotionKind,
+        title: String,
+        detail: String
+    ) {
+        self.projectID = projectID
+        self.topicID = topicID
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+    }
+}
+
 public struct TaskStartInput: Sendable {
     public var projectID: String
     public var id: String
@@ -85,6 +150,8 @@ public struct TaskStartInput: Sendable {
     public var branchedFromEventID: String
     public var tags: [String]
     public var sourceIDs: [String]
+    public var timestamp: Date?
+    public var eventID: String?
 
     public init(
         projectID: String,
@@ -95,7 +162,9 @@ public struct TaskStartInput: Sendable {
         stage: LoopStage = .intake,
         branchedFromEventID: String,
         tags: [String] = [],
-        sourceIDs: [String] = []
+        sourceIDs: [String] = [],
+        timestamp: Date? = nil,
+        eventID: String? = nil
     ) {
         self.projectID = projectID
         self.id = id
@@ -106,6 +175,8 @@ public struct TaskStartInput: Sendable {
         self.branchedFromEventID = branchedFromEventID
         self.tags = tags
         self.sourceIDs = sourceIDs
+        self.timestamp = timestamp
+        self.eventID = eventID
     }
 }
 
@@ -128,8 +199,53 @@ public struct TaskUpdate: Sendable {
     }
 }
 
+public struct WorklineReconciliationInput: Codable, Sendable {
+    public var projectID: String
+    public var worklines: [WorklineReconciliation]
+
+    public init(projectID: String, worklines: [WorklineReconciliation]) {
+        self.projectID = projectID
+        self.worklines = worklines
+    }
+}
+
+public struct WorklineReconciliation: Codable, Sendable {
+    public var id: String
+    public var title: String
+    public var objective: String
+    public var status: TaskStatus
+    public var accent: ProjectAccent
+    public var branchedFromEventID: String
+    public var mergedByEventID: String?
+    public var eventIDs: [String]
+    public var tags: [String]
+
+    public init(
+        id: String,
+        title: String,
+        objective: String,
+        status: TaskStatus,
+        accent: ProjectAccent,
+        branchedFromEventID: String,
+        mergedByEventID: String? = nil,
+        eventIDs: [String],
+        tags: [String] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.objective = objective
+        self.status = status
+        self.accent = accent
+        self.branchedFromEventID = branchedFromEventID
+        self.mergedByEventID = mergedByEventID
+        self.eventIDs = eventIDs
+        self.tags = tags
+    }
+}
+
 public struct EventInput: Sendable {
     public var id: String?
+    public var timestamp: Date?
     public var projectID: String
     public var taskID: String?
     public var mergeTaskID: String?
@@ -147,6 +263,7 @@ public struct EventInput: Sendable {
 
     public init(
         id: String? = nil,
+        timestamp: Date? = nil,
         projectID: String,
         taskID: String? = nil,
         mergeTaskID: String? = nil,
@@ -163,6 +280,7 @@ public struct EventInput: Sendable {
         sourceIDs: [String] = []
     ) {
         self.id = id
+        self.timestamp = timestamp
         self.projectID = projectID
         self.taskID = taskID
         self.mergeTaskID = mergeTaskID
@@ -280,6 +398,107 @@ public struct WorkstateService: Sendable {
     }
 
     @discardableResult
+    public func removeReviews(ids: Set<String>) throws -> WorkspaceSnapshot {
+        guard !ids.isEmpty else { return try snapshot() }
+        let mutation = WorkspaceMutation(kind: "review.remove", summary: "Removed \(ids.count) reviews")
+        return try repository.update(mutation: mutation) { snapshot in
+            snapshot.reviewInbox.removeAll { ids.contains($0.id) }
+        }
+    }
+
+    @discardableResult
+    public func removeSourceArtifacts(sourceIDs: Set<String>) throws -> WorkspaceSnapshot {
+        guard !sourceIDs.isEmpty else { return try snapshot() }
+        let mutation = WorkspaceMutation(
+            kind: "source.cleanup",
+            summary: "Removed artifacts from \(sourceIDs.count) internal sources"
+        )
+        return try repository.update(mutation: mutation) { snapshot in
+            snapshot.reviewInbox.removeAll { !$0.sourceIDs.allSatisfy { !sourceIDs.contains($0) } }
+            snapshot.relations.removeAll { relation in
+                !relation.sourceIDs.isEmpty && relation.sourceIDs.allSatisfy(sourceIDs.contains)
+            }
+            for relationIndex in snapshot.relations.indices {
+                snapshot.relations[relationIndex].sourceIDs.removeAll(where: sourceIDs.contains)
+            }
+
+            for projectIndex in snapshot.projects.indices {
+                snapshot.projects[projectIndex].sourceIDs.removeAll(where: sourceIDs.contains)
+                snapshot.projects[projectIndex].context.understanding.removeAll { statement in
+                    !statement.sourceIDs.isEmpty && statement.sourceIDs.allSatisfy(sourceIDs.contains)
+                }
+                snapshot.projects[projectIndex].context.revisions.removeAll { revision in
+                    !revision.sourceIDs.isEmpty && revision.sourceIDs.allSatisfy(sourceIDs.contains)
+                }
+                snapshot.projects[projectIndex].context.acceptedDecisions.removeAll { decision in
+                    !decision.sourceIDs.isEmpty && decision.sourceIDs.allSatisfy(sourceIDs.contains)
+                }
+                for statementIndex in snapshot.projects[projectIndex].context.understanding.indices {
+                    snapshot.projects[projectIndex].context.understanding[statementIndex].sourceIDs
+                        .removeAll(where: sourceIDs.contains)
+                }
+                for revisionIndex in snapshot.projects[projectIndex].context.revisions.indices {
+                    snapshot.projects[projectIndex].context.revisions[revisionIndex].sourceIDs
+                        .removeAll(where: sourceIDs.contains)
+                }
+                for decisionIndex in snapshot.projects[projectIndex].context.acceptedDecisions.indices {
+                    snapshot.projects[projectIndex].context.acceptedDecisions[decisionIndex].sourceIDs
+                        .removeAll(where: sourceIDs.contains)
+                }
+                for taskIndex in snapshot.projects[projectIndex].tasks.indices {
+                    snapshot.projects[projectIndex].tasks[taskIndex].sourceIDs
+                        .removeAll(where: sourceIDs.contains)
+                }
+                for topicIndex in snapshot.projects[projectIndex].topics.indices {
+                    snapshot.projects[projectIndex].topics[topicIndex].sourceIDs
+                        .removeAll(where: sourceIDs.contains)
+                    for noteIndex in snapshot.projects[projectIndex].topics[topicIndex].notes.indices {
+                        snapshot.projects[projectIndex].topics[topicIndex].notes[noteIndex].sourceIDs
+                            .removeAll(where: sourceIDs.contains)
+                    }
+                }
+
+                let removedEventIDs = Set(snapshot.projects[projectIndex].events.compactMap { event -> String? in
+                    guard !event.sourceIDs.isEmpty,
+                          event.sourceIDs.allSatisfy(sourceIDs.contains) else { return nil }
+                    return event.id
+                })
+                snapshot.projects[projectIndex].events.removeAll { removedEventIDs.contains($0.id) }
+                for eventIndex in snapshot.projects[projectIndex].events.indices {
+                    snapshot.projects[projectIndex].events[eventIndex].sourceIDs
+                        .removeAll(where: sourceIDs.contains)
+                    snapshot.projects[projectIndex].events[eventIndex].parentEventIDs
+                        .removeAll(where: removedEventIDs.contains)
+                    for decisionIndex in snapshot.projects[projectIndex].events[eventIndex].decisions.indices {
+                        snapshot.projects[projectIndex].events[eventIndex].decisions[decisionIndex].sourceIDs
+                            .removeAll(where: sourceIDs.contains)
+                    }
+                }
+            }
+            snapshot.sources.removeAll { sourceIDs.contains($0.id) }
+        }
+    }
+
+    @discardableResult
+    public func repairEventTimestamps(_ timestamps: [String: Date]) throws -> WorkspaceSnapshot {
+        guard !timestamps.isEmpty else { return try snapshot() }
+        let mutation = WorkspaceMutation(
+            kind: "event.timestamp.repair",
+            summary: "Repaired timestamps for generated events"
+        )
+        return try repository.update(mutation: mutation) { snapshot in
+            for projectIndex in snapshot.projects.indices {
+                for eventIndex in snapshot.projects[projectIndex].events.indices {
+                    let eventID = snapshot.projects[projectIndex].events[eventIndex].id
+                    if let timestamp = timestamps[eventID] {
+                        snapshot.projects[projectIndex].events[eventIndex].timestamp = timestamp
+                    }
+                }
+            }
+        }
+    }
+
+    @discardableResult
     public func resolveReview(id: String, status: ReviewStatus) throws -> WorkspaceSnapshot {
         guard status == .confirmed || status == .rejected || status == .deferred else {
             throw WorkstateStorageError.invalidState("Review resolution must be confirmed, rejected, or deferred")
@@ -296,6 +515,61 @@ public struct WorkstateService: Sendable {
             if status == .confirmed,
                let projectID = review.projectID,
                let projectIndex = snapshot.projects.firstIndex(where: { $0.id == projectID }) {
+                if let proposal = review.proposedEvent {
+                    guard snapshot.projects[projectIndex].event(id: proposal.eventID) == nil else {
+                        throw WorkstateStorageError.invalidState("Proposed event already exists: \(proposal.eventID)")
+                    }
+                    if let taskID = proposal.taskID,
+                       snapshot.projects[projectIndex].task(id: taskID) == nil {
+                        throw WorkstateStorageError.missingTask(taskID)
+                    }
+                    let parentID: String? = if let taskID = proposal.taskID {
+                        snapshot.projects[projectIndex].events(for: taskID).first?.id
+                            ?? snapshot.projects[projectIndex].task(id: taskID)?.branchedFromEventID
+                    } else {
+                        snapshot.projects[projectIndex].events
+                            .filter { $0.taskID == nil }
+                            .max { $0.timestamp < $1.timestamp }?.id
+                    }
+                    snapshot.projects[projectIndex].events.append(
+                        ProjectEvent(
+                            id: proposal.eventID,
+                            taskID: proposal.taskID,
+                            timestamp: proposal.timestamp,
+                            title: review.title,
+                            summary: review.summary,
+                            kind: proposal.kind,
+                            loopStage: proposal.stage,
+                            parentEventIDs: parentID.map { [$0] } ?? [],
+                            facts: proposal.facts,
+                            operations: proposal.operations,
+                            delivery: DeliverySnapshot(
+                                stage: proposal.delivery,
+                                verifiedAt: proposal.delivery == .unchanged || proposal.delivery == .changed
+                                    ? nil
+                                    : proposal.timestamp
+                            ),
+                            sourceIDs: review.sourceIDs
+                        )
+                    )
+                    if let taskID = proposal.taskID,
+                       let taskIndex = snapshot.projects[projectIndex].tasks.firstIndex(where: { $0.id == taskID }) {
+                        snapshot.projects[projectIndex].tasks[taskIndex].currentStage = proposal.stage
+                        snapshot.projects[projectIndex].tasks[taskIndex].updatedAt = proposal.timestamp
+                        if proposal.kind == .completed {
+                            snapshot.projects[projectIndex].tasks[taskIndex].status = .completed
+                            snapshot.projects[projectIndex].tasks[taskIndex].completedAt = proposal.timestamp
+                        } else if proposal.kind == .interruption {
+                            snapshot.projects[projectIndex].tasks[taskIndex].status = .waiting
+                        } else if proposal.kind == .resumed {
+                            snapshot.projects[projectIndex].tasks[taskIndex].status = .active
+                        }
+                    }
+                    for issue in proposal.openIssues
+                    where !snapshot.projects[projectIndex].context.openIssues.contains(issue) {
+                        snapshot.projects[projectIndex].context.openIssues.append(issue)
+                    }
+                }
                 switch review.kind {
                 case .understandingConflict where !review.proposedValue.isEmpty:
                     snapshot.projects[projectIndex].context.currentSummary = review.proposedValue
@@ -330,10 +604,157 @@ public struct WorkstateService: Sendable {
     }
 
     @discardableResult
-    public func updateDaemon(_ daemon: DaemonSnapshot) throws -> WorkspaceSnapshot {
-        let mutation = WorkspaceMutation(kind: "daemon.update", summary: daemon.activity.rawValue)
+    public func upsertTopic(projectID: String, input: ProjectTopicUpdateInput) throws -> WorkspaceSnapshot {
+        guard !input.id.isEmpty,
+              !input.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !input.currentUnderstanding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkstateStorageError.invalidState("Topic id, title, and current understanding are required")
+        }
+        guard input.status == .captured || input.status == .discussing else {
+            throw WorkstateStorageError.invalidState("Automatic topic updates cannot confirm or close a topic")
+        }
+        let mutation = WorkspaceMutation(kind: "topic.upsert", summary: input.title, projectID: projectID)
         return try repository.update(mutation: mutation) { snapshot in
-            snapshot.daemon = daemon
+            let projectIndex = try projectIndex(projectID, in: snapshot)
+            if let topicIndex = snapshot.projects[projectIndex].topics.firstIndex(where: { $0.id == input.id }) {
+                guard snapshot.projects[projectIndex].topics[topicIndex].status != .converted,
+                      snapshot.projects[projectIndex].topics[topicIndex].status != .closed else {
+                    throw WorkstateStorageError.invalidState("Confirmed or closed topics cannot be overwritten by Owner")
+                }
+                var topic = snapshot.projects[projectIndex].topics[topicIndex]
+                topic.title = input.title
+                topic.summary = input.summary
+                topic.status = input.status
+                topic.kind = input.kind
+                topic.currentUnderstanding = input.currentUnderstanding
+                topic.proposedDirection = input.proposedDirection
+                topic.deferredReason = input.deferredReason
+                topic.revisitTrigger = input.revisitTrigger
+                topic.openQuestions = input.openQuestions
+                topic.sourceIDs = Array(Set(topic.sourceIDs + input.sourceIDs)).sorted()
+                if let note = input.note, !topic.notes.contains(where: { $0.id == note.id }) {
+                    topic.notes.append(note)
+                }
+                topic.updatedAt = mutation.timestamp
+                snapshot.projects[projectIndex].topics[topicIndex] = topic
+            } else {
+                snapshot.projects[projectIndex].topics.append(
+                    ProjectTopic(
+                        id: input.id,
+                        title: input.title,
+                        summary: input.summary,
+                        status: input.status,
+                        kind: input.kind,
+                        currentUnderstanding: input.currentUnderstanding,
+                        proposedDirection: input.proposedDirection,
+                        deferredReason: input.deferredReason,
+                        revisitTrigger: input.revisitTrigger,
+                        openQuestions: input.openQuestions,
+                        notes: input.note.map { [$0] } ?? [],
+                        sourceIDs: input.sourceIDs,
+                        createdAt: mutation.timestamp,
+                        updatedAt: mutation.timestamp
+                    )
+                )
+            }
+            touchProject(at: projectIndex, timestamp: mutation.timestamp, in: &snapshot)
+        }
+    }
+
+    @discardableResult
+    public func promoteTopic(_ input: ProjectTopicPromotionInput) throws -> WorkspaceSnapshot {
+        let title = input.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = input.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !detail.isEmpty else {
+            throw WorkstateStorageError.invalidState("Promotion title and detail are required")
+        }
+        let mutation = WorkspaceMutation(kind: "topic.promote", summary: title, projectID: input.projectID)
+        return try repository.update(mutation: mutation) { snapshot in
+            let projectIndex = try projectIndex(input.projectID, in: snapshot)
+            guard let topicIndex = snapshot.projects[projectIndex].topics.firstIndex(where: { $0.id == input.topicID }) else {
+                throw WorkstateStorageError.invalidState("Topic not found: \(input.topicID)")
+            }
+            guard snapshot.projects[projectIndex].topics[topicIndex].status == .captured
+                    || snapshot.projects[projectIndex].topics[topicIndex].status == .discussing else {
+                throw WorkstateStorageError.invalidState("Only open topics can enter the formal project flow")
+            }
+            let parentEventID = snapshot.projects[projectIndex].events
+                .filter { $0.taskID == nil }
+                .max { $0.timestamp < $1.timestamp }?.id
+                ?? snapshot.projects[projectIndex].latestEvent?.id
+            guard let parentEventID else {
+                throw WorkstateStorageError.invalidState("Project has no event to branch from")
+            }
+
+            var topic = snapshot.projects[projectIndex].topics[topicIndex]
+            topic.status = .converted
+            topic.confirmedAt = mutation.timestamp
+            topic.updatedAt = mutation.timestamp
+            topic.notes.append(
+                ProjectTopicNote(
+                    timestamp: mutation.timestamp,
+                    kind: .confirmation,
+                    title: input.kind == .decision ? "确认为项目方向" : "转为后续任务",
+                    detail: detail,
+                    sourceIDs: topic.sourceIDs
+                )
+            )
+
+            switch input.kind {
+            case .decision:
+                let decision = DecisionRecord(
+                    text: detail,
+                    status: .confirmed,
+                    rationale: "由议题 \(topic.title) 经用户在 Workstate 中正式确认",
+                    sourceIDs: topic.sourceIDs
+                )
+                let event = ProjectEvent(
+                    timestamp: mutation.timestamp,
+                    title: title,
+                    summary: detail,
+                    kind: .decision,
+                    loopStage: .confirmation,
+                    parentEventIDs: [parentEventID],
+                    decisions: [decision],
+                    sourceIDs: topic.sourceIDs
+                )
+                snapshot.projects[projectIndex].context.acceptedDecisions.append(decision)
+                snapshot.projects[projectIndex].events.append(event)
+                topic.promotedDecisionID = decision.id
+            case .task:
+                let taskID = "topic-task-\(input.topicID)"
+                guard snapshot.projects[projectIndex].task(id: taskID) == nil else {
+                    throw WorkstateStorageError.invalidState("Topic task already exists: \(taskID)")
+                }
+                let task = TaskRecord(
+                    id: taskID,
+                    title: title,
+                    objective: detail,
+                    accent: snapshot.projects[projectIndex].accent,
+                    currentStage: .intake,
+                    startedAt: mutation.timestamp,
+                    updatedAt: mutation.timestamp,
+                    branchedFromEventID: parentEventID,
+                    tags: ["议题转化"],
+                    sourceIDs: topic.sourceIDs
+                )
+                let event = ProjectEvent(
+                    taskID: taskID,
+                    timestamp: mutation.timestamp,
+                    title: title,
+                    summary: detail,
+                    kind: .taskStarted,
+                    loopStage: .intake,
+                    parentEventIDs: [parentEventID],
+                    tags: ["议题转化"],
+                    sourceIDs: topic.sourceIDs
+                )
+                snapshot.projects[projectIndex].tasks.append(task)
+                snapshot.projects[projectIndex].events.append(event)
+                topic.derivedTaskIDs.append(taskID)
+            }
+            snapshot.projects[projectIndex].topics[topicIndex] = topic
+            touchProject(at: projectIndex, timestamp: mutation.timestamp, in: &snapshot)
         }
     }
 
@@ -468,8 +889,9 @@ public struct WorkstateService: Sendable {
 
     @discardableResult
     public func startTask(_ input: TaskStartInput) throws -> WorkspaceSnapshot {
-        let eventID = "task-start-\(UUID().uuidString.lowercased())"
+        let eventID = input.eventID ?? "task-start-\(UUID().uuidString.lowercased())"
         let mutation = WorkspaceMutation(
+            timestamp: input.timestamp ?? Date(),
             kind: "task.start",
             summary: input.title,
             projectID: input.projectID,
@@ -532,6 +954,98 @@ public struct WorkstateService: Sendable {
     }
 
     @discardableResult
+    public func reconcileWorklines(_ input: WorklineReconciliationInput) throws -> WorkspaceSnapshot {
+        let mutation = WorkspaceMutation(
+            kind: "workline.reconcile",
+            summary: "Reconciled \(input.worklines.count) worklines",
+            projectID: input.projectID
+        )
+        return try repository.update(mutation: mutation) { snapshot in
+            let projectIndex = try projectIndex(input.projectID, in: snapshot)
+            var project = snapshot.projects[projectIndex]
+            let knownEventIDs = Set(project.events.map(\.id))
+            let assignedEventIDs = input.worklines.flatMap(\.eventIDs)
+            guard Set(assignedEventIDs).count == assignedEventIDs.count else {
+                throw WorkstateStorageError.invalidState("A reconciled event belongs to multiple worklines")
+            }
+
+            for workline in input.worklines {
+                guard !workline.eventIDs.isEmpty else {
+                    throw WorkstateStorageError.invalidState("Reconciled workline has no events: \(workline.id)")
+                }
+                guard knownEventIDs.contains(workline.branchedFromEventID) else {
+                    throw WorkstateStorageError.missingEvent(workline.branchedFromEventID)
+                }
+                for eventID in workline.eventIDs where !knownEventIDs.contains(eventID) {
+                    throw WorkstateStorageError.missingEvent(eventID)
+                }
+                if let mergeID = workline.mergedByEventID,
+                   !workline.eventIDs.contains(mergeID) {
+                    throw WorkstateStorageError.invalidState("Merge event is outside workline: \(workline.id)")
+                }
+
+                let eventIDSet = Set(workline.eventIDs)
+                let orderedEvents = project.events
+                    .filter { eventIDSet.contains($0.id) }
+                    .sorted { $0.timestamp < $1.timestamp }
+                let sourceIDs = Array(Set(orderedEvents.flatMap(\.sourceIDs))).sorted()
+                let completedAt = workline.status == .completed
+                    ? workline.mergedByEventID
+                        .flatMap { mergeID in orderedEvents.first(where: { $0.id == mergeID })?.timestamp }
+                        ?? orderedEvents.last?.timestamp
+                    : nil
+                let task = TaskRecord(
+                    id: workline.id,
+                    title: workline.title,
+                    objective: workline.objective,
+                    status: workline.status,
+                    accent: workline.accent,
+                    currentStage: workline.status == .completed
+                        ? .completed
+                        : orderedEvents.last?.loopStage ?? .intake,
+                    startedAt: orderedEvents.first!.timestamp,
+                    updatedAt: orderedEvents.last!.timestamp,
+                    completedAt: completedAt,
+                    branchedFromEventID: workline.branchedFromEventID,
+                    mergedByEventID: workline.mergedByEventID,
+                    tags: workline.tags,
+                    sourceIDs: sourceIDs
+                )
+                if let taskIndex = project.tasks.firstIndex(where: { $0.id == workline.id }) {
+                    project.tasks[taskIndex] = task
+                } else {
+                    project.tasks.append(task)
+                }
+
+                for (index, event) in orderedEvents.enumerated() {
+                    guard let eventIndex = project.events.firstIndex(where: { $0.id == event.id }) else {
+                        throw WorkstateStorageError.missingEvent(event.id)
+                    }
+                    project.events[eventIndex].taskID = workline.id
+                    project.events[eventIndex].parentEventIDs = [
+                        index == 0 ? workline.branchedFromEventID : orderedEvents[index - 1].id
+                    ]
+                }
+            }
+
+            for taskIndex in project.tasks.indices {
+                let taskEvents = project.events
+                    .filter { $0.taskID == project.tasks[taskIndex].id && $0.kind != .taskStarted }
+                    .sorted { $0.timestamp < $1.timestamp }
+                guard let latest = taskEvents.last else { continue }
+                project.tasks[taskIndex].updatedAt = latest.timestamp
+                if project.tasks[taskIndex].status != .completed {
+                    project.tasks[taskIndex].currentStage = latest.loopStage
+                }
+            }
+            let latestTimestamp = project.events.map(\.timestamp).max() ?? mutation.timestamp
+            project.updatedAt = latestTimestamp
+            project.lastActivityAt = latestTimestamp
+            snapshot.projects[projectIndex] = project
+        }
+    }
+
+    @discardableResult
     public func appendEvent(_ input: EventInput) throws -> WorkspaceSnapshot {
         let eventID = input.id ?? UUID().uuidString.lowercased()
         let mutation = WorkspaceMutation(
@@ -557,7 +1071,7 @@ public struct WorkstateService: Sendable {
             let event = ProjectEvent(
                 id: eventID,
                 taskID: input.taskID,
-                timestamp: mutation.timestamp,
+                timestamp: input.timestamp ?? mutation.timestamp,
                 title: input.title,
                 summary: input.summary,
                 kind: input.kind,

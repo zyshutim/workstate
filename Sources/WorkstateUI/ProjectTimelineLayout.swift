@@ -2,178 +2,154 @@ import CoreGraphics
 import Foundation
 import WorkstateCore
 
-package enum ProjectTimelineNodeContent {
-    case projectEvent(ProjectEvent)
-    case task(TaskRecord)
-}
-
 package struct ProjectTimelineNode: Identifiable {
     package let id: String
-    package let timestamp: Date
-    package let lane: Int
-    package let content: ProjectTimelineNodeContent
+    package let event: ProjectEvent
+    package let task: TaskRecord?
+    package let point: CGPoint
+    package let isOnMainline: Bool
 }
 
-package struct ProjectTimelineBranch {
-    let task: TaskRecord
-    let lane: Int
-    let startPoint: CGPoint
-    let taskPoint: CGPoint
-    let mergePoint: CGPoint?
-}
-
-package struct ProjectTaskLaneAllocation {
-    package let laneByTaskID: [String: Int]
-    package let laneCount: Int
-
-    package init(tasks: [TaskRecord]) {
-        let orderedTasks = tasks.sorted {
-            if $0.startedAt == $1.startedAt { return $0.id < $1.id }
-            return $0.startedAt < $1.startedAt
-        }
-        var laneEndDates: [Date?] = []
-        var assignments: [String: Int] = [:]
-
-        for task in orderedTasks {
-            let reusableLane = laneEndDates.firstIndex { endDate in
-                guard let endDate else { return false }
-                return endDate <= task.startedAt
-            }
-            let laneIndex: Int
-            if let reusableLane {
-                laneIndex = reusableLane
-            } else {
-                laneIndex = laneEndDates.count
-                laneEndDates.append(nil)
-            }
-            assignments[task.id] = laneIndex + 1
-            laneEndDates[laneIndex] = task.terminalDate
-        }
-
-        laneByTaskID = assignments
-        laneCount = laneEndDates.count
-    }
+package struct ProjectTimelineBranch: Identifiable {
+    package let id: String
+    package let eventID: String
+    package let task: TaskRecord?
+    package let points: [CGPoint]
 }
 
 package struct ProjectTimelineLayout {
-    package static let mainlineX: CGFloat = 72
+    package static let mainlineX: CGFloat = 48
+    package static let branchLaneSpacing: CGFloat = 24
+    package static let minimumLabelStartX: CGFloat = 92
 
     package let nodes: [ProjectTimelineNode]
-    package let points: [String: CGPoint]
     package let branches: [ProjectTimelineBranch]
-    package let taskLaneByID: [String: Int]
     package let contentSize: CGSize
     package let rowYs: [CGFloat]
+    package let labelStartX: CGFloat
 
     package init(
         project: ProjectRecord,
         viewportWidth: CGFloat = WorkstateTheme.projectWidth,
-        laneWidth: CGFloat = WorkstateTheme.timelineLaneWidth,
-        rowHeight: CGFloat = WorkstateTheme.timelineRowHeight
+        rowHeight: CGFloat = WorkstateTheme.timelineRowHeight,
+        topInset: CGFloat = 0
     ) {
-        let projectEvents = project.events.filter { $0.taskID == nil }
-        let laneAllocation = ProjectTaskLaneAllocation(tasks: project.tasks)
-        taskLaneByID = laneAllocation.laneByTaskID
-
-        var moments = projectEvents.map(\.timestamp)
-        for task in project.tasks {
-            moments.append(Self.branchStartDate(for: task))
-            moments.append(Self.taskNodeDate(for: task, in: project))
-            if let completedAt = task.terminalDate {
-                moments.append(completedAt)
+        let taskByID = Dictionary(uniqueKeysWithValues: project.tasks.map { ($0.id, $0) })
+        let syntheticMergeIDs = Set(project.tasks.compactMap(\.mergedByEventID))
+        let chronologicalEvents = project.events
+            .filter { event in
+                event.kind != .taskStarted
+                    && !(syntheticMergeIDs.contains(event.id) && event.taskID == nil)
             }
-        }
-        let orderedMoments = Array(Set(moments)).sorted(by: >)
-        let yByDate = Dictionary(uniqueKeysWithValues: orderedMoments.enumerated().map { index, date in
-            (date, 66 + CGFloat(index) * rowHeight)
-        })
-        rowYs = orderedMoments.compactMap { yByDate[$0] }
-
-        var timelineNodes = projectEvents.map { event in
-            ProjectTimelineNode(
-                id: Self.eventNodeID(event.id),
-                timestamp: event.timestamp,
-                lane: 0,
-                content: .projectEvent(event)
-            )
-        }
-        timelineNodes.append(contentsOf: project.tasks.map { task in
-            ProjectTimelineNode(
-                id: Self.taskNodeID(task.id),
-                timestamp: Self.taskNodeDate(for: task, in: project),
-                lane: laneAllocation.laneByTaskID[task.id]!,
-                content: .task(task)
-            )
-        })
-        timelineNodes.sort {
-            if $0.timestamp == $1.timestamp { return $0.id < $1.id }
-            return $0.timestamp > $1.timestamp
-        }
-        nodes = timelineNodes
-
-        var nodePoints: [String: CGPoint] = [:]
-        for node in timelineNodes {
-            guard let y = yByDate[node.timestamp] else { continue }
-            nodePoints[node.id] = CGPoint(
-                x: Self.mainlineX + CGFloat(node.lane) * laneWidth,
-                y: y
-            )
-        }
-        points = nodePoints
-
-        branches = project.tasks.compactMap { task in
-            guard let lane = laneAllocation.laneByTaskID[task.id],
-                  let taskPoint = nodePoints[Self.taskNodeID(task.id)],
-                  let startY = yByDate[Self.branchStartDate(for: task)] else {
-                return nil
+            .sorted {
+                if $0.timestamp == $1.timestamp { return $0.id < $1.id }
+                return $0.timestamp < $1.timestamp
             }
-            let mergePoint = task.status == .completed
-                ? task.terminalDate.flatMap { date in
-                    yByDate[date].map { CGPoint(x: Self.mainlineX, y: $0) }
-                }
-                : nil
-            return ProjectTimelineBranch(
+
+        let primaryTaskID = project.tasks
+            .filter { $0.status == .active || $0.status == .waiting }
+            .sorted {
+                if $0.startedAt == $1.startedAt { return $0.id < $1.id }
+                return $0.startedAt < $1.startedAt
+            }
+            .first?.id
+            ?? project.tasks.max { $0.updatedAt < $1.updatedAt }?.id
+
+        let eventIndex = Dictionary(uniqueKeysWithValues: chronologicalEvents.enumerated().map { ($0.element.id, $0.offset) })
+        let branchTasks = project.tasks
+            .filter { task in
+                task.id != primaryTaskID && chronologicalEvents.contains(where: { $0.taskID == task.id })
+            }
+            .sorted {
+                if $0.startedAt == $1.startedAt { return $0.id < $1.id }
+                return $0.startedAt < $1.startedAt
+            }
+
+        var laneEndIndices: [Int] = []
+        var laneByTaskID: [String: Int] = [:]
+        for task in branchTasks {
+            let indices = chronologicalEvents.enumerated().compactMap { index, event in
+                event.taskID == task.id ? index : nil
+            }
+            guard let first = indices.first, let last = indices.last else { continue }
+            let laneOffset = laneEndIndices.firstIndex(where: { $0 < first }) ?? laneEndIndices.count
+            if laneOffset == laneEndIndices.count {
+                laneEndIndices.append(last)
+            } else {
+                laneEndIndices[laneOffset] = last
+            }
+            laneByTaskID[task.id] = laneOffset + 1
+        }
+
+        let yByEventID = Dictionary(uniqueKeysWithValues: chronologicalEvents.enumerated().map { index, event in
+            (event.id, 58 + topInset + CGFloat(chronologicalEvents.count - index - 1) * rowHeight)
+        })
+
+        let timelineNodes = chronologicalEvents.map { event -> ProjectTimelineNode in
+            let task = event.taskID.flatMap { taskByID[$0] }
+            let isMerge = task?.mergedByEventID == event.id
+            let lane = isMerge ? 0 : event.taskID.flatMap { laneByTaskID[$0] } ?? 0
+            return ProjectTimelineNode(
+                id: event.id,
+                event: event,
                 task: task,
-                lane: lane,
-                startPoint: CGPoint(x: Self.mainlineX, y: startY),
-                taskPoint: taskPoint,
-                mergePoint: mergePoint
+                point: CGPoint(
+                    x: Self.mainlineX + CGFloat(lane) * Self.branchLaneSpacing,
+                    y: yByEventID[event.id]!
+                ),
+                isOnMainline: lane == 0
+            )
+        }
+        let nodeByEventID = Dictionary(uniqueKeysWithValues: timelineNodes.map { ($0.id, $0) })
+
+        let timelineBranches = branchTasks.compactMap { task -> ProjectTimelineBranch? in
+            guard let lane = laneByTaskID[task.id] else { return nil }
+            let taskNodes = timelineNodes
+                .filter { $0.event.taskID == task.id }
+                .sorted { $0.event.timestamp < $1.event.timestamp }
+            guard let firstTaskNode = taskNodes.first else { return nil }
+
+            let branchY = nodeByEventID[task.branchedFromEventID]?.point.y
+                ?? chronologicalEvents
+                    .filter { $0.timestamp <= task.startedAt }
+                    .last
+                    .flatMap { yByEventID[$0.id] }
+                ?? firstTaskNode.point.y
+            let laneX = Self.mainlineX + CGFloat(lane) * Self.branchLaneSpacing
+            var points = [
+                CGPoint(x: Self.mainlineX, y: branchY),
+                CGPoint(x: laneX, y: firstTaskNode.point.y)
+            ]
+            points.append(contentsOf: taskNodes.map(\.point).dropFirst())
+
+            if let mergeID = task.mergedByEventID,
+               let mergeIndex = eventIndex[mergeID],
+               let mergeY = yByEventID[chronologicalEvents[mergeIndex].id],
+               points.last?.x != Self.mainlineX {
+                points.append(CGPoint(x: Self.mainlineX, y: mergeY))
+            }
+            return ProjectTimelineBranch(
+                id: "branch:\(task.id)",
+                eventID: firstTaskNode.id,
+                task: task,
+                points: points
             )
         }
 
-        let lastLaneX = Self.mainlineX + CGFloat(laneAllocation.laneCount) * laneWidth
-        contentSize = CGSize(
-            width: max(viewportWidth, lastLaneX + 88),
-            height: max(360, 108 + CGFloat(orderedMoments.count) * rowHeight)
-        )
-    }
-
-    package static func taskNodeID(_ taskID: String) -> String {
-        "task:\(taskID)"
-    }
-
-    package static func eventNodeID(_ eventID: String) -> String {
-        "event:\(eventID)"
-    }
-
-    private static func branchStartDate(for task: TaskRecord) -> Date {
-        task.startedAt
-    }
-
-    private static func taskNodeDate(for task: TaskRecord, in project: ProjectRecord) -> Date {
-        project.events(for: task.id)
-            .first(where: { $0.id != task.mergedByEventID })?
-            .timestamp ?? task.updatedAt
-    }
-}
-
-private extension TaskRecord {
-    var terminalDate: Date? {
-        switch status {
-        case .completed, .abandoned:
-            completedAt
-        case .active, .waiting, .parked:
-            nil
+        nodes = timelineNodes.sorted {
+            if $0.point.y == $1.point.y { return $0.point.x < $1.point.x }
+            return $0.point.y < $1.point.y
         }
+        branches = timelineBranches
+        rowYs = chronologicalEvents.reversed().compactMap { yByEventID[$0.id] }
+        let maximumLane = laneByTaskID.values.max() ?? 0
+        labelStartX = max(
+            Self.minimumLabelStartX,
+            Self.mainlineX + CGFloat(maximumLane) * Self.branchLaneSpacing + 24
+        )
+        contentSize = CGSize(
+            width: viewportWidth,
+            height: max(360, 92 + topInset + CGFloat(chronologicalEvents.count) * rowHeight)
+        )
     }
 }
