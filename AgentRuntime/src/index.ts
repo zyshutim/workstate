@@ -28,13 +28,26 @@ type ProjectSummary = {
   }>;
 };
 
-type RuntimeRequest =
+type RuntimeProfile = {
+  model: string;
+  reasoning: "low" | "medium" | "high" | "xhigh";
+};
+
+type RuntimeRequest = {
+  profile: RuntimeProfile;
+} & (
   | {
       mode: "route";
       segment: Segment;
       projects: ProjectSummary[];
       priorRoute?: { threadID: string; turnID: string; projectID: string; updatedAt: string };
       recentTurns: Segment[];
+    }
+  | {
+      mode: "batch_route";
+      segments: Segment[];
+      projects: ProjectSummary[];
+      routeHints: Array<{ threadID: string; projectID: string }>;
     }
   | {
       mode: "steward";
@@ -103,7 +116,8 @@ type RuntimeRequest =
           detail: string;
         }>;
       }>;
-    };
+    }
+);
 
 const routeSchema = {
   type: "object",
@@ -123,6 +137,42 @@ const routeSchema = {
     "confidence",
     "reason",
   ],
+  additionalProperties: false,
+} as const;
+
+const batchRouteSchema = {
+  type: "object",
+  properties: {
+    routes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          segmentId: { type: "string" },
+          action: {
+            type: "string",
+            enum: ["continue_previous", "switch_project", "new_project", "ignore"],
+          },
+          projectId: { type: "string" },
+          projectName: { type: "string" },
+          projectSummary: { type: "string" },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+          reason: { type: "string" },
+        },
+        required: [
+          "segmentId",
+          "action",
+          "projectId",
+          "projectName",
+          "projectSummary",
+          "confidence",
+          "reason",
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["routes"],
   additionalProperties: false,
 } as const;
 
@@ -468,6 +518,24 @@ ${JSON.stringify(request.segment)}
 `;
 }
 
+function batchRoutePrompt(request: Extract<RuntimeRequest, { mode: "batch_route" }>): string {
+  return `You are Workstate's Portfolio Router performing a cold-start import. Classify every supplied completed Codex turn while preserving their order.
+
+Return exactly one route for every segmentId and no duplicates. A single Codex task may change projects between turns. Use the ordered turns in the same thread to resolve short follow-ups. A route hint is the user's initial belief, not a permanent lock.
+Use continue_previous only when a prior turn in this batch or a route hint establishes that project. Use switch_project for a different existing project. Use new_project only for durable work that fits none of the supplied projects, and reuse the same stable projectId when several turns establish the same new project. Use ignore only for content with no project consequence.
+Do not inspect files, use tools, summarize project internals, or create worklines.
+
+PROJECTS:
+${JSON.stringify(request.projects)}
+
+USER ROUTE HINTS:
+${JSON.stringify(request.routeHints)}
+
+ORDERED TURNS:
+${JSON.stringify(request.segments)}
+`;
+}
+
 function stewardPrompt(request: Extract<RuntimeRequest, { mode: "steward" }>): string {
   return `You are the Project Steward for exactly one project. Compare one completed Codex turn with the supplied Project HEAD.
 
@@ -626,15 +694,7 @@ async function main(): Promise<void> {
   const distilledCorpus = request.mode === "rebuild"
     ? await readFile(request.evidencePath, "utf8")
     : undefined;
-  const runtimeProfile = request.mode === "route"
-    ? { model: "gpt-5.6-luna", reasoning: "low" as const }
-    : request.mode === "owner_chat"
-      ? { model: "gpt-5.6-sol", reasoning: "medium" as const }
-    : request.mode === "brief"
-      ? { model: "gpt-5.6-sol", reasoning: "medium" as const }
-    : request.mode === "rebuild"
-      ? { model: "gpt-5.6-sol", reasoning: "high" as const }
-      : { model: "gpt-5.6-terra", reasoning: "medium" as const };
+  const runtimeProfile = request.profile;
   const codex = new Codex();
   const thread = codex.startThread({
     model: runtimeProfile.model,
@@ -647,6 +707,8 @@ async function main(): Promise<void> {
   });
   const prompt = request.mode === "route"
     ? routePrompt(request)
+    : request.mode === "batch_route"
+      ? batchRoutePrompt(request)
     : request.mode === "steward"
       ? stewardPrompt(request)
       : request.mode === "owner_chat"
@@ -658,6 +720,8 @@ async function main(): Promise<void> {
         : rebuildPrompt(request, distilledCorpus!);
   const outputSchema = request.mode === "route"
     ? routeSchema
+    : request.mode === "batch_route"
+      ? batchRouteSchema
     : request.mode === "steward"
       ? stewardSchema
       : request.mode === "owner_chat"

@@ -6,6 +6,7 @@ public struct AgentRuntimeClient: Sendable {
     public let nodePath: String
     public let runtimeRoot: URL
     private let processRegistry: AgentProcessRegistry
+    private let settingsRepository: WorkstateSettingsRepository
 
     public init(
         runtimeScript: URL? = nil,
@@ -16,6 +17,7 @@ public struct AgentRuntimeClient: Sendable {
         self.nodePath = nodePath ?? Self.defaultNodePath()
         self.runtimeRoot = runtimeRoot
         processRegistry = AgentProcessRegistry()
+        settingsRepository = WorkstateSettingsRepository(root: runtimeRoot)
     }
 
     public static func defaultRuntimeScript() -> URL {
@@ -67,6 +69,7 @@ public struct AgentRuntimeClient: Sendable {
     ) throws -> RouteResult {
         let request = RouteRequest(
             mode: "route",
+            profile: try runtimeProfile(.route),
             segment: segment,
             projects: workspace.projects.map(PortfolioProjectPayload.init),
             priorRoute: try scanner.routeBinding(threadID: segment.threadID).map(RouteBindingPayload.init),
@@ -79,6 +82,39 @@ public struct AgentRuntimeClient: Sendable {
         return envelope.result
     }
 
+    public func routeBatch(
+        segments: [SessionSegment],
+        workspace: WorkspaceSnapshot,
+        routeHints: [String: String],
+        scanner: CodexSessionScanner
+    ) throws -> [BatchRouteDecision] {
+        guard !segments.isEmpty else { return [] }
+        let request = BatchRouteRequest(
+            mode: "batch_route",
+            profile: try runtimeProfile(.route),
+            segments: segments,
+            projects: workspace.projects.map(PortfolioProjectPayload.init),
+            routeHints: routeHints.map {
+                BatchRouteHintPayload(threadID: $0.key, projectID: $0.value)
+            }
+            .sorted { $0.threadID < $1.threadID }
+        )
+        let envelope: RuntimeEnvelope<BatchRouteResult> = try run(request, timeout: 600)
+        try scanner.excludeThread(envelope.runtimeThreadId)
+        try appendRun(
+            envelope,
+            segmentID: "batch-route:\(segments.first!.id):\(segments.count)"
+        )
+        let expected = Set(segments.map(\.id))
+        let actual = Set(envelope.result.routes.map(\.segmentId))
+        guard actual == expected, actual.count == envelope.result.routes.count else {
+            throw WorkstateStorageError.invalidState(
+                "Batch Router did not return exactly one decision for every segment"
+            )
+        }
+        return envelope.result.routes
+    }
+
     public func steward(
         segment: SessionSegment,
         project: ProjectRecord,
@@ -86,6 +122,7 @@ public struct AgentRuntimeClient: Sendable {
     ) throws -> StewardResult {
         let request = StewardRequest(
             mode: "steward",
+            profile: try runtimeProfile(.steward),
             segment: segment,
             project: StewardProjectPayload(project: project)
         )
@@ -104,6 +141,7 @@ public struct AgentRuntimeClient: Sendable {
     ) throws -> ProjectRebuildProposal {
         let request = RebuildRequest(
             mode: "rebuild",
+            profile: try runtimeProfile(.rebuild),
             project: RebuildProjectPayload(project: project),
             evidencePath: evidencePath,
             sourceThreadIds: sourceThreadIDs
@@ -123,6 +161,7 @@ public struct AgentRuntimeClient: Sendable {
     ) throws -> RebuildDistilledChunk {
         let request = DistillRequest(
             mode: "distill",
+            profile: try runtimeProfile(.distill),
             project: ProjectPayload(project: project),
             chunkIndex: chunkIndex,
             chunkCount: chunkCount,
@@ -148,6 +187,7 @@ public struct AgentRuntimeClient: Sendable {
     ) throws -> ProjectOwnerChatResponse {
         let request = OwnerChatRequest(
             mode: "owner_chat",
+            profile: try runtimeProfile(.ownerChat),
             project: StewardProjectPayload(project: project),
             history: history,
             message: message,
@@ -171,6 +211,7 @@ public struct AgentRuntimeClient: Sendable {
     ) throws -> DailyBriefNarrative {
         let request = BriefRequest(
             mode: "brief",
+            profile: try runtimeProfile(.brief),
             dateKey: brief.dateKey,
             sourceRevision: brief.sourceRevision,
             projects: try brief.projects.map { projectBrief in
@@ -207,6 +248,13 @@ public struct AgentRuntimeClient: Sendable {
         }
     }
 
+    private func runtimeProfile(_ role: AgentRole) throws -> RuntimeProfilePayload {
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: runtimeRoot))
+        let workspaceHasProjects = (try? repository.load().projects.isEmpty == false) ?? false
+        let settings = try settingsRepository.load(workspaceHasProjects: workspaceHasProjects)
+        return RuntimeProfilePayload(settings.profile(for: role))
+    }
+
     private func run<Request: Encodable, Result: Decodable>(
         _ request: Request,
         timeout: TimeInterval
@@ -228,8 +276,8 @@ public struct AgentRuntimeClient: Sendable {
         process.currentDirectoryURL = runtimeScript.deletingLastPathComponent().deletingLastPathComponent()
         let output = Pipe()
         let error = Pipe()
-        let outputCapture = PipeCapture(pipe: output)
-        let errorCapture = PipeCapture(pipe: error)
+        let outputCapture = PipeCapture(pipe: output, maximumBytes: 64 * 1024 * 1024)
+        let errorCapture = PipeCapture(pipe: error, maximumBytes: 8 * 1024 * 1024)
         process.standardOutput = output
         process.standardError = error
         outputCapture.start()
@@ -250,15 +298,22 @@ public struct AgentRuntimeClient: Sendable {
             throw AgentRuntimeError.timedOut(Int(timeout))
         }
 
-        let outputData = outputCapture.finish()
+        let outputResult = outputCapture.finish()
+        let errorResult = errorCapture.finish()
+        guard !outputResult.exceededLimit else {
+            throw AgentRuntimeError.failed("Agent runtime output exceeded 64 MiB")
+        }
         let errorText = String(
-            data: errorCapture.finish(),
+            data: errorResult.data,
             encoding: .utf8
         ) ?? ""
+        guard !errorResult.exceededLimit else {
+            throw AgentRuntimeError.failed("Agent runtime error output exceeded 8 MiB")
+        }
         guard process.terminationStatus == 0 else {
             throw AgentRuntimeError.failed(errorText.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return try JSONDecoder().decode(RuntimeEnvelope<Result>.self, from: outputData)
+        return try JSONDecoder().decode(RuntimeEnvelope<Result>.self, from: outputResult.data)
     }
 
     private func appendRun<Result: Encodable>(
@@ -310,11 +365,14 @@ public struct AgentRuntimeClient: Sendable {
 
 private final class PipeCapture: @unchecked Sendable {
     private let pipe: Pipe
+    private let maximumBytes: Int
     private let lock = NSLock()
     private var data = Data()
+    private var exceededLimit = false
 
-    init(pipe: Pipe) {
+    init(pipe: Pipe, maximumBytes: Int) {
         self.pipe = pipe
+        self.maximumBytes = maximumBytes
     }
 
     func start() {
@@ -323,13 +381,16 @@ private final class PipeCapture: @unchecked Sendable {
         }
     }
 
-    func finish() -> Data {
+    func finish() -> (data: Data, exceededLimit: Bool) {
         lock.lock()
         defer { lock.unlock() }
         pipe.fileHandleForReading.readabilityHandler = nil
-        let remaining = pipe.fileHandleForReading.readDataToEndOfFile()
-        data.append(remaining)
-        return data
+        while true {
+            let remaining = (try? pipe.fileHandleForReading.read(upToCount: 1024 * 1024)) ?? nil
+            guard let remaining, !remaining.isEmpty else { break }
+            append(remaining)
+        }
+        return (data, exceededLimit)
     }
 
     func cancel() {
@@ -343,7 +404,21 @@ private final class PipeCapture: @unchecked Sendable {
         defer { lock.unlock() }
         let chunk = handle.availableData
         guard !chunk.isEmpty else { return }
-        data.append(chunk)
+        append(chunk)
+    }
+
+    private func append(_ chunk: Data) {
+        let remainingCapacity = maximumBytes - data.count
+        guard remainingCapacity > 0 else {
+            exceededLimit = true
+            return
+        }
+        if chunk.count > remainingCapacity {
+            data.append(chunk.prefix(remainingCapacity))
+            exceededLimit = true
+        } else {
+            data.append(chunk)
+        }
     }
 }
 
@@ -413,6 +488,27 @@ public struct RouteResult: Codable, Equatable, Sendable {
         self.projectSummary = projectSummary
         self.confidence = confidence
         self.reason = reason
+    }
+}
+
+public struct BatchRouteDecision: Codable, Equatable, Sendable {
+    public var segmentId: String
+    public var action: String
+    public var projectId: String
+    public var projectName: String
+    public var projectSummary: String
+    public var confidence: Double
+    public var reason: String
+
+    public var routeResult: RouteResult {
+        RouteResult(
+            action: action,
+            projectId: projectId,
+            projectName: projectName,
+            projectSummary: projectSummary,
+            confidence: confidence,
+            reason: reason
+        )
     }
 }
 
@@ -514,10 +610,28 @@ public struct RebuildDistilledChunk: Codable, Equatable, Sendable {
 
 private struct RouteRequest: Codable {
     var mode: String
+    var profile: RuntimeProfilePayload
     var segment: SessionSegment
     var projects: [PortfolioProjectPayload]
     var priorRoute: RouteBindingPayload?
     var recentTurns: [SessionSegment]
+}
+
+private struct BatchRouteRequest: Codable {
+    var mode: String
+    var profile: RuntimeProfilePayload
+    var segments: [SessionSegment]
+    var projects: [PortfolioProjectPayload]
+    var routeHints: [BatchRouteHintPayload]
+}
+
+private struct BatchRouteHintPayload: Codable {
+    var threadID: String
+    var projectID: String
+}
+
+private struct BatchRouteResult: Codable {
+    var routes: [BatchRouteDecision]
 }
 
 private struct PortfolioProjectPayload: Codable {
@@ -552,12 +666,14 @@ private struct RouteBindingPayload: Codable {
 
 private struct StewardRequest: Codable {
     var mode: String
+    var profile: RuntimeProfilePayload
     var segment: SessionSegment
     var project: StewardProjectPayload
 }
 
 private struct RebuildRequest: Codable {
     var mode: String
+    var profile: RuntimeProfilePayload
     var project: RebuildProjectPayload
     var evidencePath: String
     var sourceThreadIds: [String]
@@ -565,6 +681,7 @@ private struct RebuildRequest: Codable {
 
 private struct DistillRequest: Codable {
     var mode: String
+    var profile: RuntimeProfilePayload
     var project: ProjectPayload
     var chunkIndex: Int
     var chunkCount: Int
@@ -573,6 +690,7 @@ private struct DistillRequest: Codable {
 
 private struct OwnerChatRequest: Codable {
     var mode: String
+    var profile: RuntimeProfilePayload
     var project: StewardProjectPayload
     var history: [ProjectOwnerMessage]
     var message: String
@@ -581,9 +699,20 @@ private struct OwnerChatRequest: Codable {
 
 private struct BriefRequest: Codable {
     var mode: String
+    var profile: RuntimeProfilePayload
     var dateKey: String
     var sourceRevision: String
     var projects: [BriefProjectPayload]
+}
+
+private struct RuntimeProfilePayload: Codable {
+    var model: String
+    var reasoning: String
+
+    init(_ profile: AgentProfile) {
+        model = profile.modelID
+        reasoning = profile.effort.rawValue
+    }
 }
 
 private struct BriefProjectPayload: Codable {

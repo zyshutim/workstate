@@ -11,7 +11,11 @@ public struct WorkstateRootView: View {
 
     public var body: some View {
         Group {
-            if model.isDailyBriefPresented {
+            if model.needsOnboarding {
+                ColdStartView(model: model)
+            } else if model.isSettingsPresented {
+                SettingsView(model: model)
+            } else if model.isDailyBriefPresented {
                 DailyBriefView(model: model)
             } else if let project = model.selectedProject {
                 ProjectWorkspaceView(project: project, model: model)

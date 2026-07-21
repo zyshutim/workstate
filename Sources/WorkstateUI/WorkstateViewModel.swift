@@ -20,6 +20,11 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public private(set) var dailyBrief: DailyBrief?
     @Published public private(set) var isDailyBriefPresented = false
     @Published public private(set) var hasUnreadDailyBrief = false
+    @Published public private(set) var settings = WorkstateSettings()
+    @Published public private(set) var availableModels: [CodexModelRecord] = []
+    @Published public private(set) var needsOnboarding = true
+    @Published public private(set) var isSettingsPresented = false
+    @Published public private(set) var modelCatalogError: String?
 
     public let repository: WorkstateRepository
     private let service: WorkstateService
@@ -29,7 +34,10 @@ public final class WorkstateViewModel: ObservableObject {
     private let ownerTurnRepository: ProjectOwnerTurnRepository
     private let dailyBriefRepository: DailyBriefRepository
     private let agentRuntime: AgentRuntimeClient
+    private let settingsRepository: WorkstateSettingsRepository
+    private let modelCatalog: CodexModelCatalog
     private var lastModificationDate: Date?
+    private var lastSettingsModificationDate: Date?
 
     public init(repository: WorkstateRepository = .init()) {
         self.repository = repository
@@ -40,15 +48,29 @@ public final class WorkstateViewModel: ObservableObject {
         ownerTurnRepository = ProjectOwnerTurnRepository(root: repository.paths.root)
         dailyBriefRepository = DailyBriefRepository(root: repository.paths.root)
         agentRuntime = AgentRuntimeClient(runtimeRoot: repository.paths.root)
+        settingsRepository = WorkstateSettingsRepository(root: repository.paths.root)
+        modelCatalog = CodexModelCatalog()
         do {
             try repository.ensureInitialized()
             workspace = try repository.load()
+            settings = try settingsRepository.load(workspaceHasProjects: !workspace.projects.isEmpty)
+            if !FileManager.default.fileExists(atPath: settingsRepository.url.path),
+               settings.setupCompleted {
+                try settingsRepository.save(settings)
+            }
+            needsOnboarding = !settings.setupCompleted
             lastModificationDate = repository.modificationDate()
+            lastSettingsModificationDate = settingsModificationDate()
             liveActivities = (try? liveActivityRepository.load().activities) ?? []
             daemonStatus = (try? daemonStatusRepository.load()) ?? DaemonSnapshot()
         } catch {
             workspace = WorkspaceSnapshot()
             errorMessage = error.localizedDescription
+        }
+        do {
+            availableModels = try modelCatalog.load()
+        } catch {
+            modelCatalogError = error.localizedDescription
         }
         refreshLatestActivityBrief()
     }
@@ -84,15 +106,53 @@ public final class WorkstateViewModel: ObservableObject {
     }
 
     public var preferredWidth: CGFloat {
-        isDailyBriefPresented || selectedProjectID != nil
+        needsOnboarding || isSettingsPresented || isDailyBriefPresented || selectedProjectID != nil
             ? WorkstateTheme.projectWidth
             : WorkstateTheme.graphWidth
     }
 
     public var preferredHeight: CGFloat {
-        isDailyBriefPresented || selectedProjectID != nil
+        needsOnboarding || isSettingsPresented || isDailyBriefPresented || selectedProjectID != nil
             ? WorkstateTheme.projectHeight
             : WorkstateTheme.graphHeight
+    }
+
+    public func presentSettings() {
+        isSettingsPresented = true
+    }
+
+    public func closeSettings() {
+        isSettingsPresented = false
+    }
+
+    public func saveSettings(_ value: WorkstateSettings) {
+        do {
+            var updated = normalizedSettings(value)
+            updated.setupCompleted = settings.setupCompleted
+            if updated.liveMonitoringEnabled != settings.liveMonitoringEnabled {
+                updated.liveMonitoringStartedAt = updated.liveMonitoringEnabled ? Date() : nil
+            }
+            try settingsRepository.save(updated)
+            settings = updated
+            lastSettingsModificationDate = settingsModificationDate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func completeOnboarding() {
+        do {
+            workspace = try repository.load()
+            settings = try settingsRepository.load(workspaceHasProjects: !workspace.projects.isEmpty)
+            needsOnboarding = !settings.setupCompleted
+            lastModificationDate = repository.modificationDate()
+            lastSettingsModificationDate = settingsModificationDate()
+            errorMessage = nil
+            refreshLatestActivityBrief()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     public var canShowPreviousDailyBrief: Bool {
@@ -439,6 +499,7 @@ public final class WorkstateViewModel: ObservableObject {
     public func reload(force: Bool = false) {
         reloadLiveActivities()
         reloadDaemonStatus()
+        reloadSettings()
         let modificationDate = repository.modificationDate()
         guard force || modificationDate != lastModificationDate else { return }
         do {
@@ -450,6 +511,39 @@ public final class WorkstateViewModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func reloadSettings() {
+        let modificationDate = settingsModificationDate()
+        guard modificationDate != lastSettingsModificationDate else { return }
+        do {
+            settings = try settingsRepository.load(workspaceHasProjects: !workspace.projects.isEmpty)
+            needsOnboarding = !settings.setupCompleted
+            lastSettingsModificationDate = modificationDate
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func settingsModificationDate() -> Date? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: settingsRepository.url.path)
+        return attributes?[.modificationDate] as? Date
+    }
+
+    private func normalizedSettings(_ value: WorkstateSettings) -> WorkstateSettings {
+        guard !availableModels.isEmpty else { return value }
+        var output = value
+        for role in AgentRole.allCases {
+            var profile = output.profile(for: role)
+            let model = availableModels.first(where: { $0.id == profile.modelID })
+                ?? availableModels[0]
+            profile.modelID = model.id
+            if !model.supportedEfforts.contains(profile.effort) {
+                profile.effort = model.defaultEffort
+            }
+            output.agentProfiles[role] = profile
+        }
+        return output
     }
 
     private func refreshLatestActivityBrief() {

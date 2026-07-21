@@ -150,7 +150,13 @@ struct ProjectGraphView: View {
                     Text(WorkstateDateText.relative(model.workspace.updatedAt))
                         .font(WorkstateTheme.captionFont.monospacedDigit())
                         .foregroundStyle(WorkstateTheme.secondaryLabel)
-                        .padding(.horizontal, 7)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                        .frame(width: 52, alignment: .center)
+                        .help("项目图谱更新于 \(WorkstateDateText.compact(model.workspace.updatedAt))")
+                        .accessibilityLabel(
+                            "项目图谱更新于 \(WorkstateDateText.compact(model.workspace.updatedAt))"
+                        )
 
                     GraphToolbarButton(
                         systemName: "minus.magnifyingglass",
@@ -173,6 +179,11 @@ struct ProjectGraphView: View {
                         systemName: "scope",
                         accessibilityLabel: "适配全部项目",
                         action: { fitCamera(in: size) }
+                    )
+                    GraphToolbarButton(
+                        systemName: "gearshape",
+                        accessibilityLabel: "设置",
+                        action: model.presentSettings
                     )
                     GraphToolbarButton(
                         systemName: "arrow.clockwise",

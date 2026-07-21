@@ -9,6 +9,9 @@ struct WorkstateChecks {
     @MainActor
     static func main() throws {
         try bootstrapGraphIntegrity()
+        try newWorkspaceStartsEmpty()
+        try settingsRoundTrip()
+        try modelCatalogFiltersUnsupportedOptions()
         try legacyStateMigration()
         try schemaV3Migration()
         try projectPositionUpdate()
@@ -27,6 +30,8 @@ struct WorkstateChecks {
         try sessionScannerIncremental()
         try sessionScannerReadsOnlyChangedFile()
         try sessionScannerPreservesIncompleteLine()
+        try sessionCatalogAndHistoryRangeImport()
+        try monitoringCutoffDropsDisabledPeriod()
         try segmentProcessingIsIdempotent()
         try sessionWatcherReceivesFileChanges()
         try scannerMemoryRemainsBounded()
@@ -36,6 +41,82 @@ struct WorkstateChecks {
         try projectRebuildRejectsDeltaOutsideWorkline()
         try workspaceReconcileRebindsRelationsAndPrunesSources()
         print("Workstate checks passed")
+    }
+
+    private static func newWorkspaceStartsEmpty() throws {
+        try withFixture { repository in
+            try repository.ensureInitialized()
+            let snapshot = try repository.load()
+            try require(snapshot.projects.isEmpty, "new workspace does not install demo projects")
+        }
+    }
+
+    private static func settingsRoundTrip() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-settings-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = WorkstateSettingsRepository(root: root)
+        let initial = try repository.load(workspaceHasProjects: true)
+        try require(initial.setupCompleted, "existing project workspace skips onboarding")
+        try require(initial.profile(for: .route).modelID == "gpt-5.6-luna", "router default model")
+
+        var updated = initial
+        updated.liveMonitoringEnabled = false
+        updated.agentProfiles[.brief] = AgentProfile(modelID: "gpt-5.5", effort: .high)
+        try repository.save(updated)
+        let loaded = try repository.load()
+        try require(!loaded.liveMonitoringEnabled, "monitoring setting persists")
+        try require(loaded.profile(for: .brief).effort == .high, "agent effort persists")
+    }
+
+    private static func modelCatalogFiltersUnsupportedOptions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-model-catalog-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("models.json")
+        let data = """
+        {
+          "models": [
+            {
+              "slug": "usable",
+              "display_name": "Usable",
+              "visibility": "list",
+              "supported_in_api": true,
+              "default_reasoning_level": "medium",
+              "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "medium"},
+                {"effort": "max"},
+                {"effort": "ultra"}
+              ]
+            },
+            {
+              "slug": "hidden",
+              "display_name": "Hidden",
+              "visibility": "hide",
+              "supported_in_api": true,
+              "default_reasoning_level": "medium",
+              "supported_reasoning_levels": [{"effort": "medium"}]
+            },
+            {
+              "slug": "unsupported",
+              "display_name": "Unsupported",
+              "visibility": "list",
+              "supported_in_api": false,
+              "default_reasoning_level": "medium",
+              "supported_reasoning_levels": [{"effort": "medium"}]
+            }
+          ]
+        }
+        """
+        try Data(data.utf8).write(to: url)
+        let models = try CodexModelCatalog(url: url).load()
+        try require(models.map(\.id) == ["usable"], "catalog only exposes listed API models")
+        try require(
+            models[0].supportedEfforts == [.low, .medium],
+            "catalog excludes max, ultra, and unsupported effort options"
+        )
     }
 
     private static func bootstrapGraphIntegrity() throws {
@@ -704,6 +785,125 @@ struct WorkstateChecks {
         let completed = try scanner.scanChangedFiles([session.path])
         try require(completed.count == 1, "completed partial line becomes evidence on the next event")
         try require(completed.first?.userText == "Keep the partial line", "partial line keeps prior turn state")
+    }
+
+    private static func sessionCatalogAndHistoryRangeImport() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-history-import-check-\(UUID().uuidString)", isDirectory: true)
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        let indexURL = root.appendingPathComponent("session_index.jsonl")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let now = Date()
+        let old = now.addingTimeInterval(-10 * 24 * 60 * 60)
+        let recent = now.addingTimeInterval(-2 * 24 * 60 * 60)
+        let selected = sessions.appendingPathComponent("selected.jsonl")
+        let irrelevantToolOutput = String(repeating: "x", count: 2 * 1024 * 1024)
+        let selectedContent = """
+        {"type":"session_meta","timestamp":"\(old.formatted(iso))","payload":{"id":"selected-thread","cwd":"/tmp/SelectedProject"}}
+        {"type":"event_msg","timestamp":"\(old.formatted(iso))","payload":{"type":"task_started","turn_id":"old-turn"}}
+        {"type":"event_msg","timestamp":"\(old.formatted(iso))","payload":{"type":"user_message","message":"Old history"}}
+        {"type":"event_msg","timestamp":"\(old.formatted(iso))","payload":{"type":"task_complete","turn_id":"old-turn","last_agent_message":"Old result"}}
+        {"type":"event_msg","timestamp":"\(recent.formatted(iso))","payload":{"type":"task_started","turn_id":"recent-turn"}}
+        {"type":"event_msg","timestamp":"\(recent.formatted(iso))","payload":{"type":"user_message","message":"Recent history"}}
+        {"type":"response_item","payload":{"type":"tool_output","output":"\(irrelevantToolOutput)"}}
+        {"type":"event_msg","timestamp":"\(recent.formatted(iso))","payload":{"type":"task_complete","turn_id":"recent-turn","last_agent_message":"Recent result"}}
+
+        """
+        try Data(selectedContent.utf8).write(to: selected)
+
+        let unselected = sessions.appendingPathComponent("unselected.jsonl")
+        let unselectedContent = """
+        {"type":"session_meta","timestamp":"\(recent.formatted(iso))","payload":{"id":"unselected-thread","cwd":"/tmp/OtherProject"}}
+
+        """
+        try Data(unselectedContent.utf8).write(to: unselected)
+        let index = """
+        {"id":"selected-thread","thread_name":"Older title","updated_at":"\(old.formatted(iso))"}
+        {"id":"selected-thread","thread_name":"Selected task title","updated_at":"\(recent.formatted(iso))"}
+        {"id":"unselected-thread","thread_name":"Other task","updated_at":"\(recent.formatted(iso))"}
+
+        """
+        try Data(index.utf8).write(to: indexURL)
+
+        let scanner = CodexSessionScanner(sessionsRoot: sessions, runtimeRoot: runtime)
+        let catalog = try scanner.sessionCatalog(indexURL: indexURL)
+        try require(catalog.count == 2, "session catalog lists non-internal Codex tasks")
+        try require(
+            catalog.first(where: { $0.id == "selected-thread" })?.title == "Selected task title",
+            "session catalog keeps the latest Codex title"
+        )
+        let interval = DateInterval(
+            start: now.addingTimeInterval(-3 * 24 * 60 * 60),
+            end: now.addingTimeInterval(24 * 60 * 60)
+        )
+        let preview = try scanner.previewHistory(
+            threadIDs: ["selected-thread"],
+            interval: interval
+        )
+        try require(preview.completedTurnCount == 1, "history preview counts completed turns")
+        try require(
+            preview.evidenceBytes < 32 * 1024,
+            "history preview excludes irrelevant tool payloads from model input size"
+        )
+        let imported = try scanner.importHistory(
+            threadIDs: ["selected-thread"],
+            interval: interval
+        )
+        try require(imported.count == 1, "history import applies the selected date range")
+        try require(imported[0].turnID == "recent-turn", "history import excludes older turns")
+        let recentSegments = try scanner.recentSegments(
+            threadID: "selected-thread",
+            before: now.addingTimeInterval(2 * 24 * 60 * 60)
+        )
+        try require(recentSegments.map(\.turnID) == ["recent-turn"], "evidence index reloads text by file location")
+        let state = try scanner.loadState()
+        try require(state.initialized, "history import establishes the live baseline")
+        try require(state.cursors.count == 2, "history import primes selected and unselected tasks")
+    }
+
+    private static func monitoringCutoffDropsDisabledPeriod() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-monitoring-cutoff-check-\(UUID().uuidString)", isDirectory: true)
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let now = Date()
+        let session = sessions.appendingPathComponent("rollout.jsonl")
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: session)
+        let scanner = CodexSessionScanner(sessionsRoot: sessions, runtimeRoot: runtime)
+        _ = try scanner.scan()
+
+        let beforeCutoff = now.addingTimeInterval(-60)
+        let afterCutoff = now.addingTimeInterval(60)
+        let turns = """
+        {"type":"event_msg","timestamp":"\(beforeCutoff.formatted(iso))","payload":{"type":"task_started","turn_id":"disabled-turn"}}
+        {"type":"event_msg","timestamp":"\(beforeCutoff.formatted(iso))","payload":{"type":"user_message","message":"Disabled period"}}
+        {"type":"event_msg","timestamp":"\(beforeCutoff.formatted(iso))","payload":{"type":"task_complete","turn_id":"disabled-turn","last_agent_message":"Ignored"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"task_started","turn_id":"enabled-turn"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"user_message","message":"Enabled period"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"task_complete","turn_id":"enabled-turn","last_agent_message":"Recorded"}}
+
+        """
+        let handle = try FileHandle(forWritingTo: session)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(turns.utf8))
+        try handle.close()
+
+        let result = try scanner.scanChangedFiles([session.path], minimumTimestamp: now)
+        try require(result.map(\.turnID) == ["enabled-turn"], "monitoring cutoff drops disabled-period turns")
+        let evidence = try Data(contentsOf: scanner.evidenceURL)
+        let evidenceText = String(data: evidence, encoding: .utf8) ?? ""
+        try require(!evidenceText.contains("Disabled period"), "disabled-period content never enters evidence")
     }
 
     private static func segmentProcessingIsIdempotent() throws {

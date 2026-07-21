@@ -11,6 +11,7 @@ struct WorkstateDaemon {
         let scanner = CodexSessionScanner()
         let service = WorkstateService()
         let daemonStatus = DaemonStatusRepository()
+        let settingsRepository = WorkstateSettingsRepository()
         let liveActivities = LiveActivityRepository()
         let liveProjector = LiveActivityProjector()
         let runtime = AgentRuntimeClient()
@@ -20,18 +21,27 @@ struct WorkstateDaemon {
 
         if runsOnce {
             try autoreleasepool {
-                _ = try scanner.scan()
+                let settings = try currentSettings(repository: settingsRepository, service: service)
+                _ = try scanner.scan(minimumTimestamp: monitoringCutoff(settings))
                 try updateLiveActivities(
                     repository: liveActivities,
                     projector: liveProjector,
                     scanner: scanner,
                     workspace: service.snapshot()
                 )
-                try processPending(
-                    orchestrator: orchestrator,
-                    status: daemonStatus,
-                    scanner: scanner
-                )
+                if settings.setupCompleted && settings.liveMonitoringEnabled {
+                    try processPending(
+                        orchestrator: orchestrator,
+                        status: daemonStatus,
+                        scanner: scanner
+                    )
+                } else {
+                    try setMonitoringPausedState(
+                        repository: daemonStatus,
+                        scanner: scanner,
+                        setupCompleted: settings.setupCompleted
+                    )
+                }
             }
             return
         }
@@ -59,18 +69,27 @@ struct WorkstateDaemon {
                     activity: .scanning,
                     detail: "正在检查会话状态"
                 )
-                _ = try scanner.scan()
+                let settings = try currentSettings(repository: settingsRepository, service: service)
+                _ = try scanner.scan(minimumTimestamp: monitoringCutoff(settings))
                 try updateLiveActivities(
                     repository: liveActivities,
                     projector: liveProjector,
                     scanner: scanner,
                     workspace: service.snapshot()
                 )
-                try processPending(
-                    orchestrator: orchestrator,
-                    status: daemonStatus,
-                    scanner: scanner
-                )
+                if settings.setupCompleted && settings.liveMonitoringEnabled {
+                    try processPending(
+                        orchestrator: orchestrator,
+                        status: daemonStatus,
+                        scanner: scanner
+                    )
+                } else {
+                    try setMonitoringPausedState(
+                        repository: daemonStatus,
+                        scanner: scanner,
+                        setupCompleted: settings.setupCompleted
+                    )
+                }
                 if DailyBriefScheduler.isDueToday() {
                     try composePreviousDayBrief(
                         composer: briefComposer,
@@ -95,6 +114,10 @@ struct WorkstateDaemon {
             autoreleasepool {
                 do {
                     if batch.requiresFullScan || !batch.paths.isEmpty {
+                        let settings = try currentSettings(
+                            repository: settingsRepository,
+                            service: service
+                        )
                         try setDaemonState(
                             repository: daemonStatus,
                             scanner: scanner,
@@ -102,9 +125,12 @@ struct WorkstateDaemon {
                             detail: "正在读取变化的会话"
                         )
                         if batch.requiresFullScan {
-                            _ = try scanner.scan()
+                            _ = try scanner.scan(minimumTimestamp: monitoringCutoff(settings))
                         } else {
-                            _ = try scanner.scanChangedFiles(batch.paths)
+                            _ = try scanner.scanChangedFiles(
+                                batch.paths,
+                                minimumTimestamp: monitoringCutoff(settings)
+                            )
                         }
                         try updateLiveActivities(
                             repository: liveActivities,
@@ -112,11 +138,19 @@ struct WorkstateDaemon {
                             scanner: scanner,
                             workspace: service.snapshot()
                         )
-                        try processPending(
-                            orchestrator: orchestrator,
-                            status: daemonStatus,
-                            scanner: scanner
-                        )
+                        if settings.setupCompleted && settings.liveMonitoringEnabled {
+                            try processPending(
+                                orchestrator: orchestrator,
+                                status: daemonStatus,
+                                scanner: scanner
+                            )
+                        } else {
+                            try setMonitoringPausedState(
+                                repository: daemonStatus,
+                                scanner: scanner,
+                                setupCompleted: settings.setupCompleted
+                            )
+                        }
                     }
                     if changes.consumeScheduledBrief() {
                         try composePreviousDayBrief(
@@ -181,6 +215,34 @@ struct WorkstateDaemon {
             scanner: scanner,
             activity: activity,
             detail: detail
+        )
+    }
+
+    private static func currentSettings(
+        repository: WorkstateSettingsRepository,
+        service: WorkstateService
+    ) throws -> WorkstateSettings {
+        let workspace = try service.snapshot()
+        return try repository.load(workspaceHasProjects: !workspace.projects.isEmpty)
+    }
+
+    private static func monitoringCutoff(_ settings: WorkstateSettings) -> Date? {
+        guard settings.setupCompleted, settings.liveMonitoringEnabled else {
+            return .distantFuture
+        }
+        return settings.liveMonitoringStartedAt
+    }
+
+    private static func setMonitoringPausedState(
+        repository: DaemonStatusRepository,
+        scanner: CodexSessionScanner,
+        setupCompleted: Bool
+    ) throws {
+        try setDaemonState(
+            repository: repository,
+            scanner: scanner,
+            activity: .idle,
+            detail: setupCompleted ? "实时监听已关闭" : "等待完成冷启动"
         )
     }
 

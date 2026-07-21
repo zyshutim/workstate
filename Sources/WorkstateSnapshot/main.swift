@@ -41,7 +41,12 @@ struct WorkstateSnapshot {
             let fixture = mode == "brief"
                 ? dailyBriefFixture(WorkstateBootstrap.makeInitialState())
                 : WorkstateBootstrap.makeInitialState()
-            let initial = source == .readme ? try readmeFixture(fixture) : fixture
+            let initial: WorkspaceSnapshot
+            if source == .onboarding {
+                initial = WorkspaceSnapshot()
+            } else {
+                initial = source == .readme ? try readmeFixture(fixture) : fixture
+            }
             try repository.ensureInitialized(initial: initial)
         } else {
             try repository.ensureInitialized()
@@ -104,6 +109,9 @@ struct WorkstateSnapshot {
                 topicID: mode == "topic" ? (snapshotTopicID ?? "website-docs-readability") : nil
             )
         let renderer = ImageRenderer(content: view)
+        if source == .onboarding {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        }
         renderer.scale = 2
         renderer.proposedSize = ProposedViewSize(width: model.preferredWidth, height: model.preferredHeight)
 
@@ -269,7 +277,7 @@ private enum SnapshotError: LocalizedError {
         case let .invalidAppearance(value):
             "Unsupported appearance '\(value)'; expected light or dark"
         case let .invalidSource(value):
-            "Unsupported source '\(value)'; expected bootstrap, readme, or live"
+            "Unsupported source '\(value)'; expected bootstrap, readme, onboarding, or live"
         }
     }
 }
@@ -277,6 +285,7 @@ private enum SnapshotError: LocalizedError {
 private enum SnapshotSource: String {
     case bootstrap
     case readme
+    case onboarding
     case live
 }
 

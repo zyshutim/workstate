@@ -63,7 +63,7 @@ public struct WorkstateRepository: Sendable {
         guard FileManager.default.fileExists(atPath: paths.state.path) else {
             _ = try withLock(exclusive: true) {
                 guard !FileManager.default.fileExists(atPath: paths.state.path) else { return }
-                let snapshot = initial ?? WorkstateBootstrap.makeInitialState()
+                let snapshot = initial ?? WorkspaceSnapshot()
                 try validate(snapshot)
                 try writeUnlocked(snapshot)
                 try appendMutationUnlocked(

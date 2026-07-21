@@ -61,6 +61,46 @@ public struct ActiveSession: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct CodexSessionRecord: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var cwd: String
+    public var sourcePath: String
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        title: String,
+        cwd: String,
+        sourcePath: String,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.title = title
+        self.cwd = cwd
+        self.sourcePath = sourcePath
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public var workspaceName: String {
+        let value = URL(fileURLWithPath: cwd).lastPathComponent
+        return value.isEmpty ? "其他任务" : value
+    }
+}
+
+public struct HistoryImportPreview: Equatable, Sendable {
+    public var completedTurnCount: Int
+    public var evidenceBytes: UInt64
+
+    public init(completedTurnCount: Int, evidenceBytes: UInt64) {
+        self.completedTurnCount = completedTurnCount
+        self.evidenceBytes = evidenceBytes
+    }
+}
+
 public struct IngestionSnapshot: Codable, Equatable, Sendable {
     public var initialized: Bool
     public var cursors: [String: SessionCursor]
@@ -184,14 +224,22 @@ public struct ScannerDiagnostics: Equatable, Sendable {
 private final class SessionScannerStorage: @unchecked Sendable {
     let lock = NSRecursiveLock()
     var state: IngestionSnapshot?
-    var evidenceByID: [String: SessionSegment]?
+    var evidenceLocations: [String: EvidenceLocation]?
     var diagnostics = ScannerDiagnostics()
+}
+
+private struct EvidenceLocation {
+    var offset: UInt64
+    var length: Int
+    var threadID: String
+    var timestamp: Date
 }
 
 private struct SessionMetadata {
     var threadID: String
     var cwd: String
     var isInternalAgentSession: Bool
+    var createdAt: Date?
 }
 
 public struct CodexSessionScanner: Sendable {
@@ -217,14 +265,17 @@ public struct CodexSessionScanner: Sendable {
         runtimeRoot.appendingPathComponent("evidence.jsonl")
     }
 
-    public func scan() throws -> [SessionSegment] {
+    public func scan(minimumTimestamp: Date? = nil) throws -> [SessionSegment] {
         try synchronized {
             storage.diagnostics.fullScans += 1
-            return try scanUnlocked(files: sessionFiles())
+            return try scanUnlocked(files: sessionFiles(), minimumTimestamp: minimumTimestamp)
         }
     }
 
-    public func scanChangedFiles(_ paths: [String]) throws -> [SessionSegment] {
+    public func scanChangedFiles(
+        _ paths: [String],
+        minimumTimestamp: Date? = nil
+    ) throws -> [SessionSegment] {
         try synchronized {
             storage.diagnostics.changedFileScans += 1
             let rootPath = sessionsRoot.path
@@ -237,7 +288,10 @@ public struct CodexSessionScanner: Sendable {
                 }
                 return url
             })
-            return try scanUnlocked(files: files.sorted { $0.path < $1.path })
+            return try scanUnlocked(
+                files: files.sorted { $0.path < $1.path },
+                minimumTimestamp: minimumTimestamp
+            )
         }
     }
 
@@ -245,7 +299,7 @@ public struct CodexSessionScanner: Sendable {
         synchronized { storage.diagnostics }
     }
 
-    private func scanUnlocked(files: [URL]) throws -> [SessionSegment] {
+    private func scanUnlocked(files: [URL], minimumTimestamp: Date?) throws -> [SessionSegment] {
         try FileManager.default.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
         var state = try loadStateUnlocked()
         let previousState = state
@@ -311,13 +365,16 @@ public struct CodexSessionScanner: Sendable {
             let result = try readAppended(file: file, cursor: cursor)
             cursor = result.cursor
             state.cursors[file.path] = cursor
-            segments.append(contentsOf: result.segments)
+            segments.append(contentsOf: result.segments.filter { segment in
+                guard let minimumTimestamp else { return true }
+                return segment.timestamp >= minimumTimestamp
+            })
         }
 
         state.excludedThreadIDs = excludedThreadIDs.sorted()
 
         if !segments.isEmpty {
-            let knownEvidenceIDs = Set(try evidenceIndex().keys)
+            let knownEvidenceIDs = Set(try evidenceLocationIndex().keys)
             segments = Array(Dictionary(
                 segments.map { ($0.id, $0) },
                 uniquingKeysWith: { _, latest in latest }
@@ -340,6 +397,150 @@ public struct CodexSessionScanner: Sendable {
             try saveState(state)
         }
         return try loadPendingSegments(ids: state.pendingSegmentIDs)
+    }
+
+    public func sessionCatalog(
+        indexURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/session_index.jsonl")
+    ) throws -> [CodexSessionRecord] {
+        try synchronized {
+            let titles = try loadSessionIndex(indexURL)
+            return try sessionFiles().compactMap { file in
+                guard let metadata = try sessionMetadata(for: file),
+                      !metadata.isInternalAgentSession,
+                      !metadata.threadID.isEmpty else {
+                    return nil
+                }
+                let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+                let modifiedAt = attributes[.modificationDate] as? Date ?? Date.distantPast
+                let indexed = titles[metadata.threadID]
+                let title = indexed?.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                return CodexSessionRecord(
+                    id: metadata.threadID,
+                    title: title?.isEmpty == false ? title! : "未命名任务",
+                    cwd: metadata.cwd,
+                    sourcePath: file.path,
+                    createdAt: metadata.createdAt
+                        ?? Self.timestamp(fromTimeOrderedID: metadata.threadID)
+                        ?? modifiedAt,
+                    updatedAt: max(indexed?.updatedAt ?? Date.distantPast, modifiedAt)
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.updatedAt == rhs.updatedAt ? lhs.title < rhs.title : lhs.updatedAt > rhs.updatedAt
+            }
+        }
+    }
+
+    public func importHistory(
+        threadIDs: Set<String>,
+        interval: DateInterval
+    ) throws -> [SessionSegment] {
+        try synchronized {
+            guard !threadIDs.isEmpty else {
+                throw WorkstateStorageError.invalidState("Select at least one Codex task")
+            }
+            guard interval.start < interval.end else {
+                throw WorkstateStorageError.invalidState("History range must have a start before its end")
+            }
+
+            try FileManager.default.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
+            var state = try loadStateUnlocked()
+            var imported: [SessionSegment] = []
+            var discovered = Set<String>()
+            var excluded = Set(state.excludedThreadIDs)
+
+            for file in try sessionFiles() {
+                guard let metadata = try sessionMetadata(for: file), !metadata.threadID.isEmpty else {
+                    continue
+                }
+                if metadata.isInternalAgentSession {
+                    excluded.insert(metadata.threadID)
+                    state.cursors[file.path] = try primeCursor(for: file)
+                    continue
+                }
+
+                if threadIDs.contains(metadata.threadID) {
+                    discovered.insert(metadata.threadID)
+                    let result = try readHistoricalFile(file)
+                    var cursor = result.cursor
+                    cursor.isInternalAgentSession = false
+                    state.cursors[file.path] = cursor
+                    imported.append(contentsOf: result.segments.filter {
+                        $0.timestamp >= interval.start && $0.timestamp < interval.end
+                    })
+                } else {
+                    state.cursors[file.path] = try primeCursor(for: file)
+                }
+            }
+
+            let missing = threadIDs.subtracting(discovered)
+            guard missing.isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "Selected Codex tasks were not found: \(missing.sorted().joined(separator: ", "))"
+                )
+            }
+
+            imported = Array(
+                Dictionary(imported.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest }).values
+            )
+            .sorted { $0.timestamp < $1.timestamp }
+
+            let known = Set(try evidenceLocationIndex().keys)
+            let newSegments = imported.filter { !known.contains($0.id) }
+            if !newSegments.isEmpty {
+                try appendEvidence(newSegments)
+            }
+
+            let importedIDs = imported.map(\.id)
+            let pending = Set(state.pendingSegmentIDs)
+            state.pendingSegmentIDs.append(contentsOf: importedIDs.filter { !pending.contains($0) })
+            var records = state.processingRecords ?? [:]
+            for segmentID in importedIDs where records[segmentID] == nil {
+                records[segmentID] = SegmentProcessingRecord(segmentID: segmentID)
+            }
+            state.processingRecords = records
+            state.excludedThreadIDs = excluded.sorted()
+            state.initialized = true
+            state.lastScanAt = Date()
+            try saveState(state)
+            return try loadPendingSegments(ids: importedIDs)
+        }
+    }
+
+    public func previewHistory(
+        threadIDs: Set<String>,
+        interval: DateInterval
+    ) throws -> HistoryImportPreview {
+        try synchronized {
+            guard !threadIDs.isEmpty, interval.start < interval.end else {
+                throw WorkstateStorageError.invalidState("History preview requires tasks and a valid range")
+            }
+            var discovered = Set<String>()
+            var turnCount = 0
+            var evidenceBytes: UInt64 = 0
+            for file in try sessionFiles() {
+                guard let metadata = try sessionMetadata(for: file),
+                      threadIDs.contains(metadata.threadID),
+                      !metadata.isInternalAgentSession else {
+                    continue
+                }
+                discovered.insert(metadata.threadID)
+                let metrics = try historicalMetrics(file, interval: interval)
+                turnCount += metrics.turnCount
+                evidenceBytes += metrics.evidenceBytes
+            }
+            let missing = threadIDs.subtracting(discovered)
+            guard missing.isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "Selected Codex tasks were not found: \(missing.sorted().joined(separator: ", "))"
+                )
+            }
+            return HistoryImportPreview(
+                completedTurnCount: turnCount,
+                evidenceBytes: evidenceBytes
+            )
+        }
     }
 
     public func loadState() throws -> IngestionSnapshot {
@@ -514,11 +715,12 @@ public struct CodexSessionScanner: Sendable {
     public func recentSegments(threadID: String, before timestamp: Date, limit: Int = 3) throws -> [SessionSegment] {
         try synchronized {
             guard limit > 0 else { return [] }
-            return Array(try evidenceIndex().values
+            let locations = Array(try evidenceLocationIndex().values
                 .filter { $0.threadID == threadID && $0.timestamp < timestamp }
                 .sorted { $0.timestamp > $1.timestamp }
                 .prefix(limit)
                 .reversed())
+            return try locations.map(readEvidence)
         }
     }
 
@@ -615,7 +817,9 @@ public struct CodexSessionScanner: Sendable {
                 sourcePath: file.path
             )
         }
-        cursor.offset = tailStart + UInt64(completeByteCount(in: data))
+        // Priming establishes a baseline, so bytes that already existed must never
+        // become a later backlog even when the tail starts inside one large JSONL record.
+        cursor.offset = fileSize
         return cursor
     }
 
@@ -623,25 +827,157 @@ public struct CodexSessionScanner: Sendable {
         file: URL,
         cursor: SessionCursor
     ) throws -> (cursor: SessionCursor, segments: [SessionSegment]) {
-        let handle = try FileHandle(forReadingFrom: file)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: cursor.offset)
-        let data = try handle.readToEnd() ?? Data()
         var updated = cursor
         var segments: [SessionSegment] = []
-
-        for line in completeLines(in: data, dropsFirstPartialLine: false) {
+        let completedOffset = try streamRelevantLines(
+            in: file,
+            startingAt: cursor.offset,
+            markers: Self.ingestionLineMarkers
+        ) { line in
             if let segment = apply(
                 line: line.data,
-                lineOffset: cursor.offset + UInt64(line.offset),
+                lineOffset: line.offset,
                 cursor: &updated,
                 sourcePath: file.path
             ) {
                 segments.append(segment)
             }
         }
-        updated.offset = cursor.offset + UInt64(completeByteCount(in: data))
+        updated.offset = completedOffset
         return (updated, segments)
+    }
+
+    private func readHistoricalFile(
+        _ file: URL,
+        chunkSize: Int = 1024 * 1024
+    ) throws -> (cursor: SessionCursor, segments: [SessionSegment]) {
+        var cursor = SessionCursor()
+        var segments: [SessionSegment] = []
+        let completedOffset = try streamRelevantLines(
+            in: file,
+            chunkSize: chunkSize,
+            markers: Self.ingestionLineMarkers
+        ) { line in
+            if let segment = apply(
+                line: line.data,
+                lineOffset: line.offset,
+                cursor: &cursor,
+                sourcePath: file.path
+            ) {
+                segments.append(segment)
+            }
+        }
+        cursor.offset = completedOffset
+        return (cursor, segments)
+    }
+
+    private func historicalMetrics(
+        _ file: URL,
+        interval: DateInterval,
+        chunkSize: Int = 1024 * 1024
+    ) throws -> (turnCount: Int, evidenceBytes: UInt64) {
+        var cursor = SessionCursor()
+        var turnCount = 0
+        var evidenceBytes: UInt64 = 0
+        let encoder = WorkstateCoding.makeEncoder(pretty: false)
+        _ = try streamRelevantLines(
+            in: file,
+            chunkSize: chunkSize,
+            markers: Self.ingestionLineMarkers
+        ) { line in
+            guard let segment = apply(
+                line: line.data,
+                lineOffset: line.offset,
+                cursor: &cursor,
+                sourcePath: file.path
+            ),
+            segment.timestamp >= interval.start,
+            segment.timestamp < interval.end else {
+                return
+            }
+            turnCount += 1
+            evidenceBytes += UInt64(try encoder.encode(segment).count + 1)
+        }
+        return (turnCount, evidenceBytes)
+    }
+
+    private struct StreamedLine {
+        var data: Data
+        var offset: UInt64
+        var length: Int
+    }
+
+    private static let ingestionLineMarkers = [
+        Data("\"session_meta\"".utf8),
+        Data("\"turn_context\"".utf8),
+        Data("\"event_msg\"".utf8)
+    ]
+    private func streamRelevantLines(
+        in file: URL,
+        startingAt startOffset: UInt64 = 0,
+        chunkSize: Int = 1024 * 1024,
+        prefixInspectionLimit: Int = 256 * 1024,
+        maximumRelevantLineBytes: Int = 64 * 1024 * 1024,
+        markers: [Data],
+        body: (StreamedLine) throws -> Void
+    ) throws -> UInt64 {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: startOffset)
+
+        var pending = Data()
+        var lineStartOffset = startOffset
+        var readOffset = startOffset
+        var completedOffset = startOffset
+        var discardingLine = false
+
+        while true {
+            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
+            if chunk.isEmpty { break }
+            var fragmentStart = chunk.startIndex
+
+            while fragmentStart < chunk.endIndex,
+                  let newline = chunk[fragmentStart...].firstIndex(of: 0x0A) {
+                if !discardingLine {
+                    pending.append(chunk[fragmentStart..<newline])
+                    guard pending.count <= maximumRelevantLineBytes else {
+                        throw WorkstateStorageError.invalidState(
+                            "Relevant session record exceeds 64 MiB: \(file.path)"
+                        )
+                    }
+                    if containsAnyMarker(pending, markers: markers) {
+                        let length = Int(readOffset + UInt64(chunk.distance(from: chunk.startIndex, to: newline)) + 1 - lineStartOffset)
+                        try body(StreamedLine(data: pending, offset: lineStartOffset, length: length))
+                    }
+                }
+
+                let next = chunk.index(after: newline)
+                completedOffset = readOffset + UInt64(chunk.distance(from: chunk.startIndex, to: next))
+                lineStartOffset = completedOffset
+                pending.removeAll(keepingCapacity: false)
+                discardingLine = false
+                fragmentStart = next
+            }
+
+            if fragmentStart < chunk.endIndex, !discardingLine {
+                pending.append(chunk[fragmentStart..<chunk.endIndex])
+                if pending.count >= prefixInspectionLimit,
+                   !containsAnyMarker(pending, markers: markers) {
+                    pending.removeAll(keepingCapacity: false)
+                    discardingLine = true
+                } else if pending.count > maximumRelevantLineBytes {
+                    throw WorkstateStorageError.invalidState(
+                        "Relevant session record exceeds 64 MiB: \(file.path)"
+                    )
+                }
+            }
+            readOffset += UInt64(chunk.count)
+        }
+        return completedOffset
+    }
+
+    private func containsAnyMarker(_ data: Data, markers: [Data]) -> Bool {
+        markers.isEmpty || markers.contains { data.range(of: $0) != nil }
     }
 
     private func apply(
@@ -721,41 +1057,71 @@ public struct CodexSessionScanner: Sendable {
         }
         let handle = try FileHandle(forWritingTo: evidenceURL)
         defer { try? handle.close() }
-        try handle.seekToEnd()
+        var offset = try handle.seekToEnd()
         for segment in segments {
             var data = try WorkstateCoding.makeEncoder(pretty: false).encode(segment)
             data.append(0x0A)
             try handle.write(contentsOf: data)
-        }
-        if storage.evidenceByID != nil {
-            for segment in segments {
-                storage.evidenceByID?[segment.id] = segment
+            if storage.evidenceLocations != nil {
+                storage.evidenceLocations?[segment.id] = EvidenceLocation(
+                    offset: offset,
+                    length: data.count,
+                    threadID: segment.threadID,
+                    timestamp: segment.timestamp
+                )
             }
+            offset += UInt64(data.count)
         }
     }
 
     private func loadPendingSegments(ids: [String]) throws -> [SessionSegment] {
         guard !ids.isEmpty else { return [] }
-        let index = try evidenceIndex()
-        return ids.compactMap { index[$0] }.sorted { $0.timestamp < $1.timestamp }
+        let index = try evidenceLocationIndex()
+        return try ids.compactMap { index[$0] }
+            .map(readEvidence)
+            .sorted { $0.timestamp < $1.timestamp }
     }
 
-    private func evidenceIndex() throws -> [String: SessionSegment] {
-        if let cached = storage.evidenceByID { return cached }
+    private func evidenceLocationIndex() throws -> [String: EvidenceLocation] {
+        if let cached = storage.evidenceLocations { return cached }
         storage.diagnostics.evidenceIndexLoads += 1
         guard FileManager.default.fileExists(atPath: evidenceURL.path) else {
-            storage.evidenceByID = [:]
+            storage.evidenceLocations = [:]
             return [:]
         }
-        let segments = try Data(contentsOf: evidenceURL).split(separator: 0x0A).map { line in
-            try WorkstateCoding.makeDecoder().decode(SessionSegment.self, from: Data(line))
+        var index: [String: EvidenceLocation] = [:]
+        _ = try streamRelevantLines(in: evidenceURL, markers: []) { line in
+            let segment = try WorkstateCoding.makeDecoder().decode(
+                SessionSegment.self,
+                from: line.data
+            )
+            index[segment.id] = EvidenceLocation(
+                offset: line.offset,
+                length: line.length,
+                threadID: segment.threadID,
+                timestamp: segment.timestamp
+            )
         }
-        let index = Dictionary(
-            segments.map { ($0.id, $0) },
-            uniquingKeysWith: { _, latest in latest }
-        )
-        storage.evidenceByID = index
+        storage.evidenceLocations = index
         return index
+    }
+
+    private func readEvidence(at location: EvidenceLocation) throws -> SessionSegment {
+        let handle = try FileHandle(forReadingFrom: evidenceURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: location.offset)
+        var data = Data()
+        while data.count < location.length {
+            let chunk = try handle.read(upToCount: location.length - data.count) ?? Data()
+            guard !chunk.isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "Evidence ended before its indexed length at \(location.offset)"
+                )
+            }
+            data.append(chunk)
+        }
+        if data.last == 0x0A { data.removeLast() }
+        return try WorkstateCoding.makeDecoder().decode(SessionSegment.self, from: data)
     }
 
     private func saveState(_ state: IngestionSnapshot) throws {
@@ -817,8 +1183,26 @@ public struct CodexSessionScanner: Sendable {
             cwd: cwd,
             isInternalAgentSession: isWorkstateAgentCWD(cwd)
                 || originator == "codex_sdk_ts"
-                || source?["subagent"] != nil
+                || source?["subagent"] != nil,
+            createdAt: parseTimestamp(object["timestamp"] as? String)
         )
+    }
+
+    private func loadSessionIndex(_ url: URL) throws -> [String: SessionIndexEntry] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        var output: [String: SessionIndexEntry] = [:]
+        for line in try Data(contentsOf: url).split(separator: 0x0A) {
+            guard let entry = try? WorkstateCoding.makeDecoder().decode(
+                SessionIndexEntry.self,
+                from: Data(line)
+            ) else {
+                continue
+            }
+            if output[entry.id]?.updatedAt ?? Date.distantPast <= entry.updatedAt {
+                output[entry.id] = entry
+            }
+        }
+        return output
     }
 
     private func isWorkstateAgentCWD(_ cwd: String) -> Bool {
@@ -867,6 +1251,18 @@ public struct CodexSessionScanner: Sendable {
         let precise = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
         let fallback = Date.ISO8601FormatStyle()
         return (try? precise.parse(value)) ?? (try? fallback.parse(value))
+    }
+}
+
+private struct SessionIndexEntry: Codable {
+    var id: String
+    var title: String
+    var updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title = "thread_name"
+        case updatedAt = "updated_at"
     }
 }
 
