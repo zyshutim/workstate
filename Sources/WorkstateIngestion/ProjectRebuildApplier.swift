@@ -245,13 +245,13 @@ public struct ProjectRebuildApplier: Sendable {
             throw WorkstateStorageError.invalidState("Rebuild proposal contains duplicate delta ids")
         }
 
-        let allEvidenceIDs = proposal.understanding.flatMap(\.evidenceIds)
-            + proposal.acceptedDecisions.flatMap(\.evidenceIds)
-            + proposal.objectModel.flatMap(\.evidenceIds)
-            + proposal.forbiddenDirections.flatMap(\.evidenceIds)
-            + proposal.openIssues.flatMap(\.evidenceIds)
-            + proposal.worklines.flatMap(\.evidenceIds)
-            + proposal.deltas.flatMap(\.evidenceIds)
+        var allEvidenceIDs = proposal.understanding.flatMap(\.evidenceIds)
+        allEvidenceIDs.append(contentsOf: proposal.acceptedDecisions.flatMap(\.evidenceIds))
+        allEvidenceIDs.append(contentsOf: proposal.objectModel.flatMap(\.evidenceIds))
+        allEvidenceIDs.append(contentsOf: proposal.forbiddenDirections.flatMap(\.evidenceIds))
+        allEvidenceIDs.append(contentsOf: proposal.openIssues.flatMap(\.evidenceIds))
+        allEvidenceIDs.append(contentsOf: proposal.worklines.flatMap(\.evidenceIds))
+        allEvidenceIDs.append(contentsOf: proposal.deltas.flatMap(\.evidenceIds))
         guard !allEvidenceIDs.isEmpty else {
             throw WorkstateStorageError.invalidState("Rebuild proposal contains no evidence references")
         }

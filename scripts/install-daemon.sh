@@ -57,7 +57,7 @@ cat > "$PLIST" <<PLIST
     <string>$RUNTIME_DIR/dist/index.js</string>
   </dict>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
   <key>KeepAlive</key>
   <false/>
   <key>ProcessType</key>

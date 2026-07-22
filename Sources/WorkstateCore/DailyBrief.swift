@@ -481,6 +481,10 @@ public struct DailyBriefRepository: Sendable {
                 for: day,
                 includeCurrentState: includeCurrentState
             )
+            if let existing = try load(dateKey: candidate.dateKey),
+               existing.currentNarrative != nil {
+                return existing
+            }
             if candidate.isEmpty {
                 let url = directory.appendingPathComponent("\(candidate.dateKey).json")
                 if FileManager.default.fileExists(atPath: url.path) {
@@ -522,14 +526,18 @@ public struct DailyBriefRepository: Sendable {
 
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             for url in try briefURLs() where !activeDateKeys.contains(url.deletingPathExtension().lastPathComponent) {
-                try FileManager.default.removeItem(at: url)
+                let existing = try load(dateKey: url.deletingPathExtension().lastPathComponent)
+                if existing?.currentNarrative == nil {
+                    try FileManager.default.removeItem(at: url)
+                }
             }
 
             return try candidates.map { candidate in
-                if let existing = try load(dateKey: candidate.dateKey),
-                   existing.sourceRevision == candidate.sourceRevision,
-                   !existing.isEmpty {
-                    return existing
+                if let existing = try load(dateKey: candidate.dateKey), !existing.isEmpty {
+                    if existing.currentNarrative != nil
+                        || existing.sourceRevision == candidate.sourceRevision {
+                        return existing
+                    }
                 }
                 try save(candidate)
                 guard let stored = try load(dateKey: candidate.dateKey) else {

@@ -24,6 +24,7 @@ package struct ProjectTimelineLayout {
 
     package let nodes: [ProjectTimelineNode]
     package let branches: [ProjectTimelineBranch]
+    package let primaryTaskID: String?
     package let contentSize: CGSize
     package let rowYs: [CGFloat]
     package let labelStartX: CGFloat
@@ -141,6 +142,7 @@ package struct ProjectTimelineLayout {
             return $0.point.y < $1.point.y
         }
         branches = timelineBranches
+        self.primaryTaskID = primaryTaskID
         rowYs = chronologicalEvents.reversed().compactMap { yByEventID[$0.id] }
         let maximumLane = laneByTaskID.values.max() ?? 0
         labelStartX = max(

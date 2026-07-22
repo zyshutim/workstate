@@ -154,8 +154,6 @@ struct ProjectWorkspaceView: View {
                     Circle()
                         .fill(project.status.color(accent: project.accent))
                         .frame(width: 6, height: 6)
-                    Text(project.status.displayName)
-                        .font(WorkstateTheme.captionEmphasisFont)
                     WorkspaceToolbarButton(
                         systemName: "arrow.clockwise",
                         accessibilityLabel: "刷新",
@@ -287,11 +285,9 @@ private struct ProjectContextSection: View {
                     Text(project.context.currentSummary)
                         .font(WorkstateTheme.secondaryFont)
                         .foregroundStyle(WorkstateTheme.secondaryLabel)
-                        .lineLimit(isExpanded ? nil : 3)
+                        .lineLimit(isExpanded ? nil : 2)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    ProjectFacts(project: project)
-                        .padding(.top, 2)
                 }
 
                 Spacer(minLength: 8)
@@ -344,14 +340,6 @@ private struct ProjectContextSection: View {
     private var expandedContextContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             ContextBlock(title: "项目目的", values: [project.context.purpose])
-            ContextBlock(title: "对象与关系", values: project.context.objectModel)
-            ContextBlock(title: "范围", values: project.context.inScope)
-            ContextBlock(
-                title: "禁止方向",
-                values: project.context.forbiddenDirections.isEmpty
-                    ? project.context.outOfScope
-                    : project.context.forbiddenDirections
-            )
             ContextBlock(title: "开放问题", values: project.context.openIssues)
 
             Rectangle()
@@ -360,18 +348,6 @@ private struct ProjectContextSection: View {
 
             ContextUnderstandingSection(statements: project.context.understanding)
 
-            Rectangle()
-                .fill(WorkstateTheme.separator.opacity(0.64))
-                .frame(height: 0.5)
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text("理解更新日志")
-                    .font(WorkstateTheme.captionEmphasisFont)
-                    .foregroundStyle(WorkstateTheme.secondaryLabel)
-                ForEach(project.context.revisions.sorted(by: { $0.timestamp > $1.timestamp }).prefix(5)) { revision in
-                    ContextRevisionRow(revision: revision)
-                }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
@@ -393,20 +369,6 @@ private struct ProjectContextSection: View {
 
     private var contextBackground: Color {
         WorkstateTheme.contextBackground.opacity(0.38)
-    }
-}
-
-private struct ProjectFacts: View {
-    let project: ProjectRecord
-
-    var body: some View {
-        HStack(spacing: 15) {
-            Label("\(project.tasks.count) 工作线", systemImage: "arrow.triangle.branch")
-            Label("\(project.activeTasks.count) 活跃", systemImage: "arrow.triangle.branch")
-            Label("\(project.context.revisions.count) 理解更新", systemImage: "text.book.closed")
-        }
-        .font(WorkstateTheme.captionFont.monospacedDigit())
-        .foregroundStyle(WorkstateTheme.secondaryLabel)
     }
 }
 
@@ -504,6 +466,10 @@ private struct ProjectTimelineSection: View {
     let onSelectEvent: (String) -> Void
     let onSelectTaskEvent: (String) -> Void
     let onDismissEvent: () -> Void
+    @Environment(\.workstateSnapshotProgressMode) private var snapshotProgressMode
+    @Environment(\.workstateSnapshotRendering) private var snapshotRendering
+    @State private var mode: ProjectProgressVisualizationMode = .timeline
+    @State private var includesBranchHistory = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -511,56 +477,145 @@ private struct ProjectTimelineSection: View {
                 .fill(WorkstateTheme.separator.opacity(0.72))
                 .frame(height: 0.5)
 
-            HStack(spacing: 10) {
-                Text("工作历史")
-                    .font(WorkstateTheme.sectionTitleFont)
-                Text("最新在上")
-                    .font(WorkstateTheme.captionFont)
-                    .foregroundStyle(WorkstateTheme.secondaryLabel)
-
-                Spacer(minLength: 8)
-
-                if let task = project.activeTasks.first {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(task.accent.color)
-                            .frame(width: 6, height: 6)
-                        Text(task.title)
-                            .font(WorkstateTheme.captionEmphasisFont)
-                            .lineLimit(1)
-                    }
-                    if project.activeTasks.count > 1 {
-                        Text("+\(project.activeTasks.count - 1)")
-                            .font(WorkstateTheme.captionFont.monospacedDigit())
-                            .foregroundStyle(WorkstateTheme.secondaryLabel)
+            HStack {
+                if displayedMode == .branches {
+                    if snapshotRendering {
+                        SnapshotHistoryToggle(isOn: displayedIncludesBranchHistory)
+                    } else {
+                        Toggle("历史", isOn: $includesBranchHistory)
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                            .font(WorkstateTheme.microFont)
+                            .fixedSize()
                     }
                 }
+                Spacer(minLength: 0)
+                Group {
+                    if snapshotRendering {
+                        SnapshotProgressModePicker(mode: displayedMode)
+                    } else {
+                        Picker("进展视图", selection: $mode) {
+                            Text("时间").tag(ProjectProgressVisualizationMode.timeline)
+                            Text("分支").tag(ProjectProgressVisualizationMode.branches)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .controlSize(.mini)
+                    }
+                }
+                .frame(width: 132)
             }
-            .padding(.horizontal, 20)
-            .frame(height: 46)
+            .padding(.horizontal, 12)
+            .frame(height: 38)
 
             Rectangle()
                 .fill(WorkstateTheme.separator.opacity(0.54))
                 .frame(height: 0.5)
 
-            ProjectGitTimeline(
-                workspace: workspace,
-                project: project,
-                liveActivity: liveActivity,
-                isContextExpanded: isContextExpanded,
-                selectedEventID: selectedEventID,
-                onSelectEvent: onSelectEvent,
-                onSelectTaskEvent: onSelectTaskEvent,
-                onDismissEvent: onDismissEvent
-            )
+            Group {
+                switch displayedMode {
+                case .timeline:
+                    ProjectGitTimeline(
+                        workspace: workspace,
+                        project: project,
+                        liveActivity: liveActivity,
+                        isContextExpanded: isContextExpanded,
+                        selectedEventID: selectedEventID,
+                        onSelectEvent: onSelectEvent,
+                        onSelectTaskEvent: onSelectTaskEvent,
+                        onDismissEvent: onDismissEvent
+                    )
+                case .branches:
+                    ProjectBranchTreeView(
+                        workspace: workspace,
+                        project: project,
+                        includesHistory: displayedIncludesBranchHistory,
+                        isContextExpanded: isContextExpanded,
+                        selectedEventID: selectedEventID,
+                        onSelectEvent: onSelectEvent,
+                        onSelectTaskEvent: onSelectTaskEvent,
+                        onDismissEvent: onDismissEvent
+                    )
+                }
+            }
             .frame(maxHeight: .infinity)
         }
         .frame(maxHeight: .infinity)
         .background(timelineBackground)
+        .onChange(of: mode) { _, _ in
+            onDismissEvent()
+        }
+        .onChange(of: includesBranchHistory) { _, _ in
+            onDismissEvent()
+        }
+    }
+
+    private var displayedMode: ProjectProgressVisualizationMode {
+        snapshotProgressMode?.hasPrefix(ProjectProgressVisualizationMode.branches.rawValue) == true
+            ? .branches
+            : mode
+    }
+
+    private var displayedIncludesBranchHistory: Bool {
+        snapshotProgressMode == "branches-history" ? true : includesBranchHistory
     }
 
     private var timelineBackground: Color {
         WorkstateTheme.timelineBackground
+    }
+}
+
+private struct SnapshotHistoryToggle: View {
+    let isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("历史")
+                .font(WorkstateTheme.microFont)
+                .foregroundStyle(WorkstateTheme.secondaryLabel)
+            Capsule()
+                .fill(isOn ? WorkstateTheme.activeState : WorkstateTheme.primaryLabel.opacity(0.14))
+                .frame(width: 26, height: 15)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 11, height: 11)
+                        .padding(2)
+                }
+        }
+    }
+}
+
+private enum ProjectProgressVisualizationMode: String, CaseIterable {
+    case timeline
+    case branches
+}
+
+private struct SnapshotProgressModePicker: View {
+    let mode: ProjectProgressVisualizationMode
+
+    var body: some View {
+        HStack(spacing: 2) {
+            segment("时间", mode: .timeline)
+            segment("分支", mode: .branches)
+        }
+        .padding(2)
+        .background(
+            WorkstateTheme.primaryLabel.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: WorkstateTheme.smallCornerRadius)
+        )
+    }
+
+    private func segment(_ title: String, mode candidate: ProjectProgressVisualizationMode) -> some View {
+        Text(title)
+            .font(WorkstateTheme.microFont.weight(.medium))
+            .foregroundStyle(candidate == mode ? WorkstateTheme.primaryLabel : WorkstateTheme.secondaryLabel)
+            .frame(maxWidth: .infinity)
+            .frame(height: 24)
+            .background(
+                candidate == mode ? WorkstateTheme.raisedSurfaceBackground : .clear,
+                in: RoundedRectangle(cornerRadius: 5)
+            )
     }
 }
 
@@ -582,21 +637,62 @@ private struct ProjectGitTimeline: View {
         )
     }
 
-    var body: some View {
-        Group {
-            if snapshotRendering {
-                timelineContent
-                    .frame(
-                        width: WorkstateTheme.projectWidth,
-                        height: isContextExpanded ? 284 : 520,
-                        alignment: .topLeading
-                    )
-                    .clipped()
-            } else {
-                ScrollView([.horizontal, .vertical]) {
-                    timelineContent
+    private var taskColors: [String: Color] {
+        TimelineTaskPalette.colors(
+            for: project,
+            primaryTaskID: layout.primaryTaskID
+        )
+    }
+
+    private var legendTasks: [TaskRecord] {
+        let displayedTaskIDs = Set(layout.nodes.compactMap { $0.task?.id })
+        return project.tasks
+            .filter {
+                displayedTaskIDs.contains($0.id)
+                    && ($0.status == .active || $0.status == .waiting)
+            }
+            .sorted { left, right in
+                if left.id == layout.primaryTaskID { return true }
+                if right.id == layout.primaryTaskID { return false }
+                if left.status.sortOrder != right.status.sortOrder {
+                    return left.status.sortOrder < right.status.sortOrder
                 }
-                .scrollIndicators(.visible)
+                if left.updatedAt == right.updatedAt { return left.id < right.id }
+                return left.updatedAt > right.updatedAt
+            }
+    }
+
+    private var legendHeight: CGFloat {
+        TimelineTaskLegend.height(for: legendTasks.count)
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if snapshotRendering {
+                    timelineContent
+                        .frame(
+                            width: WorkstateTheme.projectWidth,
+                            height: isContextExpanded ? 284 : 520,
+                            alignment: .topLeading
+                        )
+                        .clipped()
+                } else {
+                    ScrollView([.horizontal, .vertical]) {
+                        timelineContent
+                            .padding(.bottom, legendHeight + 24)
+                    }
+                    .scrollIndicators(.visible)
+                }
+            }
+
+            if !legendTasks.isEmpty {
+                TimelineTaskLegend(
+                    tasks: legendTasks,
+                    colors: taskColors,
+                    primaryTaskID: layout.primaryTaskID
+                )
+                .padding(12)
             }
         }
     }
@@ -604,7 +700,7 @@ private struct ProjectGitTimeline: View {
     private var timelineContent: some View {
         ZStack(alignment: .topLeading) {
             TimelineBackdrop(layout: layout)
-            TimelineBranches(project: project, layout: layout)
+            TimelineBranches(project: project, layout: layout, taskColors: taskColors)
 
             if let liveActivity {
                 LiveActivityNode(
@@ -626,6 +722,7 @@ private struct ProjectGitTimeline: View {
                     project: project,
                     event: node.event,
                     task: node.task,
+                    taskColors: taskColors,
                     isSelected: selectedEventID == node.event.id,
                     nodeX: node.point.x,
                     labelStartX: layout.labelStartX,
@@ -659,12 +756,12 @@ private struct LiveActivityNode: View {
                 .frame(width: TimelineNodeLayout.hitSize, height: TimelineNodeLayout.hitSize)
                 .offset(x: nodeX - TimelineNodeLayout.hitSize / 2)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(activity.title)
                     .font(WorkstateTheme.secondaryFont.weight(.semibold))
                     .foregroundStyle(WorkstateTheme.primaryLabel)
                     .lineLimit(1)
-                Text("正在进行 · \(WorkstateDateText.compact(activity.updatedAt))")
+                Text(WorkstateDateText.compact(activity.updatedAt))
                     .font(WorkstateTheme.microFont.monospacedDigit())
                     .foregroundStyle(accent)
             }
@@ -711,12 +808,13 @@ private struct TimelineBackdrop: View {
 private struct TimelineBranches: View {
     let project: ProjectRecord
     let layout: ProjectTimelineLayout
+    let taskColors: [String: Color]
 
     var body: some View {
         Canvas { context, _ in
             for branch in layout.branches {
                 guard let first = branch.points.first else { continue }
-                let color = branch.task?.accent.color ?? project.accent.color
+                let color = branch.task.flatMap { taskColors[$0.id] } ?? project.accent.color
                 var path = Path()
                 path.move(to: first)
                 var previous = first
@@ -749,6 +847,7 @@ private struct TimelineEventButton: View {
     let project: ProjectRecord
     let event: ProjectEvent
     let task: TaskRecord?
+    let taskColors: [String: Color]
     let isSelected: Bool
     let nodeX: CGFloat
     let labelStartX: CGFloat
@@ -834,18 +933,13 @@ private struct TimelineEventButton: View {
     }
 
     private var eventLabel: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(event.title)
                 .font(WorkstateTheme.secondaryFont.weight(.semibold))
                 .foregroundStyle(WorkstateTheme.primaryLabel)
                 .lineLimit(1)
 
-            Text(event.summary)
-                .font(WorkstateTheme.microFont)
-                .foregroundStyle(WorkstateTheme.secondaryLabel)
-                .lineLimit(1)
-
-            Text("\(task?.title ?? "项目主线") · \(task?.status.displayName ?? event.loopStage.displayName) · \(WorkstateDateText.compact(event.timestamp))")
+            Text(WorkstateDateText.compact(event.timestamp))
                 .font(WorkstateTheme.microFont.monospacedDigit())
                 .foregroundStyle(WorkstateTheme.tertiaryLabel)
                 .lineLimit(1)
@@ -854,7 +948,7 @@ private struct TimelineEventButton: View {
     }
 
     private var nodeColor: Color {
-        task?.accent.color ?? project.accent.color
+        task.flatMap { taskColors[$0.id] } ?? project.accent.color
     }
 
     private var detailPopoverBinding: Binding<Bool> {
@@ -876,6 +970,139 @@ private struct TimelineEventButton: View {
     private func dismissDetail() {
         isHovered = false
         onDismiss()
+    }
+}
+
+private struct TimelineTaskLegend: View {
+    private static let width: CGFloat = 280
+    private static let rowHeight: CGFloat = 18
+    private static let rowSpacing: CGFloat = 8
+    private static let verticalPadding: CGFloat = 12
+
+    let tasks: [TaskRecord]
+    let colors: [String: Color]
+    let primaryTaskID: String?
+
+    static func height(for taskCount: Int) -> CGFloat {
+        guard taskCount > 0 else { return 0 }
+        return verticalPadding * 2
+            + CGFloat(taskCount) * rowHeight
+            + CGFloat(taskCount - 1) * rowSpacing
+    }
+
+    var body: some View {
+        WorkstateGlassContainer {
+            VStack(alignment: .leading, spacing: Self.rowSpacing) {
+                ForEach(tasks) { task in
+                    legendItem(for: task)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, Self.verticalPadding)
+            .frame(
+                width: Self.width,
+                height: Self.height(for: tasks.count),
+                alignment: .topLeading
+            )
+            .workstateGlassSurface(cornerRadius: WorkstateTheme.cornerRadius)
+        }
+        .frame(width: Self.width, height: Self.height(for: tasks.count))
+    }
+
+    private func legendItem(for task: TaskRecord) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(colors[task.id] ?? task.accent.color)
+                .frame(width: 7, height: 7)
+
+            Text(task.title)
+                .font(WorkstateTheme.captionFont)
+                .foregroundStyle(WorkstateTheme.primaryLabel)
+
+            if task.id == primaryTaskID {
+                Spacer(minLength: 8)
+                Text("主线")
+                    .font(WorkstateTheme.microFont)
+                    .foregroundStyle(WorkstateTheme.tertiaryLabel)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: Self.rowHeight, alignment: .leading)
+        .help(task.title)
+    }
+}
+
+enum TimelineTaskPalette {
+    private struct Token {
+        let id: String
+        let color: Color
+    }
+
+    private static let tokens: [Token] = [
+        Token(id: ProjectAccent.blue.rawValue, color: ProjectAccent.blue.color),
+        Token(id: ProjectAccent.green.rawValue, color: ProjectAccent.green.color),
+        Token(id: ProjectAccent.red.rawValue, color: ProjectAccent.red.color),
+        Token(id: ProjectAccent.amber.rawValue, color: ProjectAccent.amber.color),
+        Token(id: ProjectAccent.violet.rawValue, color: ProjectAccent.violet.color),
+        Token(id: ProjectAccent.cyan.rawValue, color: ProjectAccent.cyan.color),
+        Token(id: "yellow", color: SmartisanColorTokens.Theme.yellow.representative),
+        Token(id: "orange", color: SmartisanColorTokens.Theme.orange.representative),
+        Token(id: "rose", color: SmartisanColorTokens.Theme.sekichiku.representative),
+        Token(id: "gold", color: SmartisanColorTokens.Theme.karekusa.representative),
+        Token(id: "sage", color: SmartisanColorTokens.Theme.sabiseiji.representative),
+        Token(id: "lavender", color: SmartisanColorTokens.Theme.hatobaMurasaki.representative),
+        Token(id: "olive", color: SmartisanColorTokens.Theme.yanagisuTakecha.representative),
+        Token(id: "warm-gray", color: SmartisanColorTokens.Theme.enshuNezumi.representative),
+        Token(id: "brown", color: SmartisanColorTokens.Theme.ochikuri.representative),
+        Token(id: "wine", color: SmartisanColorTokens.Theme.suoh.representative)
+    ]
+
+    static func colors(for project: ProjectRecord, primaryTaskID: String?) -> [String: Color] {
+        guard !project.tasks.isEmpty else { return [:] }
+
+        let mainlineTokenID = project.accent.rawValue
+        var usedTokenIDs = Set([mainlineTokenID])
+        var assigned: [String: Color] = [:]
+        if let primaryTaskID {
+            assigned[primaryTaskID] = project.accent.color
+        }
+
+        let branchTasks = project.tasks
+            .filter { $0.id != primaryTaskID }
+            .sorted {
+                if $0.startedAt == $1.startedAt { return $0.id < $1.id }
+                return $0.startedAt < $1.startedAt
+            }
+
+        for task in branchTasks {
+            let preferredID = task.accent.rawValue
+            let token = tokens.first {
+                $0.id == preferredID && !usedTokenIDs.contains($0.id)
+            } ?? tokens.first {
+                !usedTokenIDs.contains($0.id)
+            } ?? reusableToken(for: task.id, excluding: mainlineTokenID)
+
+            assigned[task.id] = token.color
+            usedTokenIDs.insert(token.id)
+        }
+        return assigned
+    }
+
+    private static func reusableToken(for taskID: String, excluding excludedID: String) -> Token {
+        let available = tokens.filter { $0.id != excludedID }
+        let index = taskID.utf8.reduce(0) { ($0 + Int($1)) % available.count }
+        return available[index]
+    }
+}
+
+private extension TaskStatus {
+    var sortOrder: Int {
+        switch self {
+        case .active: 0
+        case .waiting: 1
+        case .parked: 2
+        case .completed: 3
+        case .abandoned: 4
+        }
     }
 }
 

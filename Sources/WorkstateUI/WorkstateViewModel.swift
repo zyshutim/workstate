@@ -165,11 +165,7 @@ public final class WorkstateViewModel: ObservableObject {
 
     public func presentDailyBrief() {
         do {
-            let briefs = try dailyBriefRepository.synchronize(
-                workspace: workspace,
-                through: Date(),
-                calendar: .current
-            )
+            let briefs = try availableNarrativeBriefs()
             dailyBrief = briefs.last
             isDailyBriefPresented = true
             if let brief = dailyBrief {

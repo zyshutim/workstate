@@ -108,6 +108,9 @@ struct WorkstateSnapshot {
                 page: mode == "owner" ? "owner" : (mode == "topics" || mode == "topic" ? "topics" : nil),
                 topicID: mode == "topic" ? (snapshotTopicID ?? "website-docs-readability") : nil
             )
+            .workstateSnapshotProgressMode(
+                mode == "branch-history" ? "branches-history" : (mode == "branch" ? "branches" : nil)
+            )
         let renderer = ImageRenderer(content: view)
         if source == .onboarding {
             RunLoop.current.run(until: Date().addingTimeInterval(0.75))

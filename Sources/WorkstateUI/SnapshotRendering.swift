@@ -16,6 +16,10 @@ private struct WorkstateSnapshotTopicIDKey: EnvironmentKey {
     static let defaultValue: String? = nil
 }
 
+private struct WorkstateSnapshotProgressModeKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
 extension EnvironmentValues {
     var workstateSnapshotRendering: Bool {
         get { self[WorkstateSnapshotRenderingKey.self] }
@@ -36,6 +40,11 @@ extension EnvironmentValues {
         get { self[WorkstateSnapshotTopicIDKey.self] }
         set { self[WorkstateSnapshotTopicIDKey.self] = newValue }
     }
+
+    var workstateSnapshotProgressMode: String? {
+        get { self[WorkstateSnapshotProgressModeKey.self] }
+        set { self[WorkstateSnapshotProgressModeKey.self] = newValue }
+    }
 }
 
 public extension View {
@@ -50,5 +59,9 @@ public extension View {
     func workstateSnapshotWorkspace(page: String?, topicID: String? = nil) -> some View {
         environment(\.workstateSnapshotWorkspacePage, page)
             .environment(\.workstateSnapshotTopicID, topicID)
+    }
+
+    func workstateSnapshotProgressMode(_ mode: String?) -> some View {
+        environment(\.workstateSnapshotProgressMode, mode)
     }
 }

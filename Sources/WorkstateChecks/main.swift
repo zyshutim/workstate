@@ -24,6 +24,7 @@ struct WorkstateChecks {
         try contextRevisionAuthority()
         try projectTimelineHierarchy()
         try projectTimelineParallelProjection()
+        try projectBranchTreeProjection()
         try timelineSelectionHierarchy()
         try reviewResolutionAuthority()
         try projectUpdateReviewWritesEventOnConfirmation()
@@ -430,7 +431,7 @@ struct WorkstateChecks {
                     taskID: task.id,
                     timestamp: tuesdayProgress.addingTimeInterval(60),
                     title: "Foreground canary advanced",
-                    summary: "A later update invalidates the previous narrative",
+                    summary: "A later update must not rewrite the scheduled narrative",
                     kind: .verification,
                     loopStage: .verification
                 )
@@ -441,8 +442,8 @@ struct WorkstateChecks {
                 calendar: calendar
             ).last!
             try require(
-                changedLatest.sourceRevision != narrated.sourceRevision && changedLatest.currentNarrative == nil,
-                "new source records invalidate the previous narrative instead of displaying stale prose"
+                changedLatest == narrated,
+                "a scheduled narrative remains immutable when later records arrive"
             )
         }
     }
@@ -1475,6 +1476,107 @@ struct WorkstateChecks {
         try require(!layout.nodes.contains(where: { $0.id == taskStart.id }), "synthetic task start stays hidden")
         try require(!layout.nodes.contains(where: { $0.id == merge.id }), "synthetic merge stays hidden")
         try require(Set(layout.nodes.map { $0.point.y }).count == layout.nodes.count, "every visible event gets its own row")
+    }
+
+    private static func projectBranchTreeProjection() throws {
+        let projectStart = ProjectEvent(
+            id: "project-start",
+            timestamp: timelineDate(0),
+            title: "Project started",
+            summary: "Start",
+            kind: .projectStarted,
+            loopStage: .intake
+        )
+        let parent = TaskRecord(
+            id: "base-method",
+            title: "Base method",
+            objective: "Establish the base method",
+            status: .active,
+            startedAt: timelineDate(1),
+            updatedAt: timelineDate(3),
+            branchedFromEventID: projectStart.id
+        )
+        let baseEvent = ProjectEvent(
+            id: "base-result",
+            taskID: parent.id,
+            timestamp: timelineDate(2),
+            title: "Base result",
+            summary: "Established the base",
+            kind: .implementation,
+            loopStage: .implementation
+        )
+        let child = TaskRecord(
+            id: "variant-method",
+            title: "Variant method",
+            objective: "Test one modification",
+            status: .abandoned,
+            startedAt: timelineDate(3),
+            updatedAt: timelineDate(5),
+            branchedFromEventID: baseEvent.id
+        )
+        let childEvent = ProjectEvent(
+            id: "variant-result",
+            taskID: child.id,
+            timestamp: timelineDate(4),
+            title: "Variant failed",
+            summary: "Recorded why the branch did not work",
+            kind: .verification,
+            loopStage: .verification
+        )
+        let project = ProjectRecord(
+            id: "project",
+            name: "Project",
+            summary: "Summary",
+            graphPosition: .init(x: 0, y: 0),
+            tasks: [parent, child],
+            events: [projectStart, baseEvent, childEvent]
+        )
+
+        let currentLayout = ProjectBranchTreeLayout(project: project)
+        try require(currentLayout.rows.map(\.id) == [parent.id], "current branch tree hides abandoned tasks")
+        try require(!currentLayout.nodes.contains(where: { $0.id == childEvent.id }), "current branch tree hides abandoned task logs")
+
+        let layout = ProjectBranchTreeLayout(project: project, includesHistory: true)
+        try require(layout.rows.map(\.id) == [parent.id, child.id], "branch tree keeps parent before child")
+        try require(layout.rows.last?.depth == 1, "branch tree records child depth")
+        guard let parentPoint = layout.nodes.first(where: { $0.id == baseEvent.id })?.point,
+              let childPath = layout.paths.first(where: { $0.task.id == child.id }) else {
+            throw CheckFailure.failed("branch tree geometry")
+        }
+        try require(childPath.points.first == parentPoint, "branch starts from its exact parent event")
+        try require(layout.nodes.contains(where: { $0.id == childEvent.id }), "failed branch log remains visible")
+
+        let completedParent = TaskRecord(
+            id: parent.id,
+            title: parent.title,
+            objective: parent.objective,
+            status: .completed,
+            startedAt: parent.startedAt,
+            updatedAt: parent.updatedAt,
+            completedAt: parent.updatedAt,
+            branchedFromEventID: parent.branchedFromEventID
+        )
+        let activeChild = TaskRecord(
+            id: child.id,
+            title: child.title,
+            objective: child.objective,
+            status: .active,
+            startedAt: child.startedAt,
+            updatedAt: child.updatedAt,
+            branchedFromEventID: child.branchedFromEventID
+        )
+        let currentProject = ProjectRecord(
+            id: project.id,
+            name: project.name,
+            summary: project.summary,
+            graphPosition: project.graphPosition,
+            tasks: [completedParent, activeChild],
+            events: project.events
+        )
+        let promotedLayout = ProjectBranchTreeLayout(project: currentProject)
+        try require(promotedLayout.rows.map(\.id) == [activeChild.id], "active child remains visible when completed parent is hidden")
+        try require(promotedLayout.rows.first?.parentTaskID == nil, "active child becomes a current-view root")
+        try require(promotedLayout.rows.first?.depth == 0, "promoted active child has root depth")
     }
 
     private static func worklineReconciliationRepairsSemanticOwnership() throws {
