@@ -43,7 +43,7 @@ package struct ProjectBranchTreeLayout {
         topInset: CGFloat = 24
     ) {
         let includedTasks = project.tasks.filter { task in
-            includesHistory || task.status == .active || task.status == .waiting || task.status == .parked
+            includesHistory || task.status == .active
         }
         let includedTaskIDs = Set(includedTasks.map(\.id))
         let taskByID = Dictionary(uniqueKeysWithValues: includedTasks.map { ($0.id, $0) })
@@ -183,11 +183,13 @@ package struct ProjectBranchTreeLayout {
             )
         }
 
-        let selectedPrimaryTaskID = includedTasks
-            .filter { $0.status == .active || $0.status == .waiting }
+        let selectedPrimaryTaskID = project.focusedTaskID
+            .flatMap { focusedID in includedTasks.first(where: { $0.id == focusedID })?.id }
+            ?? includedTasks
+            .filter { $0.status == .active }
             .sorted {
-                if $0.startedAt == $1.startedAt { return $0.id < $1.id }
-                return $0.startedAt < $1.startedAt
+                if $0.updatedAt == $1.updatedAt { return $0.id < $1.id }
+                return $0.updatedAt > $1.updatedAt
             }
             .first?.id
             ?? includedTasks.max { $0.updatedAt < $1.updatedAt }?.id

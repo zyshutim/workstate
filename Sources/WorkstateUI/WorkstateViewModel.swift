@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import WorkstateCore
@@ -17,6 +18,13 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public private(set) var daemonStatus = DaemonSnapshot()
     @Published public private(set) var ownerConversations: [String: ProjectOwnerConversation] = [:]
     @Published public private(set) var ownerChatSendingProjectIDs: Set<String> = []
+    @Published public private(set) var globalConversation = GlobalConversation()
+    @Published public private(set) var isGlobalChatSending = false
+    @Published public private(set) var isGlobalChatPresented = false
+    @Published public private(set) var collaborationProfile = CollaborationProfile()
+    @Published public private(set) var collaborationConversation = CollaborationConversation()
+    @Published public private(set) var isCollaborationPresented = false
+    @Published public private(set) var isCollaborationSending = false
     @Published public private(set) var dailyBrief: DailyBrief?
     @Published public private(set) var isDailyBriefPresented = false
     @Published public private(set) var hasUnreadDailyBrief = false
@@ -25,6 +33,7 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public private(set) var needsOnboarding = true
     @Published public private(set) var isSettingsPresented = false
     @Published public private(set) var modelCatalogError: String?
+    @Published public private(set) var copiedHandoffProjectID: String?
 
     public let repository: WorkstateRepository
     private let service: WorkstateService
@@ -32,6 +41,9 @@ public final class WorkstateViewModel: ObservableObject {
     private let daemonStatusRepository: DaemonStatusRepository
     private let ownerConversationRepository: ProjectOwnerConversationRepository
     private let ownerTurnRepository: ProjectOwnerTurnRepository
+    private let globalConversationRepository: GlobalConversationRepository
+    private let collaborationProfileRepository: CollaborationProfileRepository
+    private let collaborationConversationRepository: CollaborationConversationRepository
     private let dailyBriefRepository: DailyBriefRepository
     private let agentRuntime: AgentRuntimeClient
     private let settingsRepository: WorkstateSettingsRepository
@@ -46,6 +58,9 @@ public final class WorkstateViewModel: ObservableObject {
         daemonStatusRepository = DaemonStatusRepository(root: repository.paths.root)
         ownerConversationRepository = ProjectOwnerConversationRepository(root: repository.paths.root)
         ownerTurnRepository = ProjectOwnerTurnRepository(root: repository.paths.root)
+        globalConversationRepository = GlobalConversationRepository(root: repository.paths.root)
+        collaborationProfileRepository = CollaborationProfileRepository(root: repository.paths.root)
+        collaborationConversationRepository = CollaborationConversationRepository(root: repository.paths.root)
         dailyBriefRepository = DailyBriefRepository(root: repository.paths.root)
         agentRuntime = AgentRuntimeClient(runtimeRoot: repository.paths.root)
         settingsRepository = WorkstateSettingsRepository(root: repository.paths.root)
@@ -63,6 +78,10 @@ public final class WorkstateViewModel: ObservableObject {
             lastSettingsModificationDate = settingsModificationDate()
             liveActivities = (try? liveActivityRepository.load().activities) ?? []
             daemonStatus = (try? daemonStatusRepository.load()) ?? DaemonSnapshot()
+            globalConversation = (try? globalConversationRepository.load()) ?? GlobalConversation()
+            collaborationProfile = (try? collaborationProfileRepository.load()) ?? CollaborationProfile()
+            collaborationConversation = (try? collaborationConversationRepository.load())
+                ?? CollaborationConversation()
         } catch {
             workspace = WorkspaceSnapshot()
             errorMessage = error.localizedDescription
@@ -106,13 +125,15 @@ public final class WorkstateViewModel: ObservableObject {
     }
 
     public var preferredWidth: CGFloat {
-        needsOnboarding || isSettingsPresented || isDailyBriefPresented || selectedProjectID != nil
+        needsOnboarding || isSettingsPresented || isDailyBriefPresented || isGlobalChatPresented
+            || isCollaborationPresented || selectedProjectID != nil
             ? WorkstateTheme.projectWidth
             : WorkstateTheme.graphWidth
     }
 
     public var preferredHeight: CGFloat {
-        needsOnboarding || isSettingsPresented || isDailyBriefPresented || selectedProjectID != nil
+        needsOnboarding || isSettingsPresented || isDailyBriefPresented || isGlobalChatPresented
+            || isCollaborationPresented || selectedProjectID != nil
             ? WorkstateTheme.projectHeight
             : WorkstateTheme.graphHeight
     }
@@ -123,6 +144,35 @@ public final class WorkstateViewModel: ObservableObject {
 
     public func closeSettings() {
         isSettingsPresented = false
+    }
+
+    public func presentGlobalChat() {
+        do {
+            globalConversation = try globalConversationRepository.load()
+            isGlobalChatPresented = true
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func closeGlobalChat() {
+        isGlobalChatPresented = false
+    }
+
+    public func presentCollaborationProfile() {
+        do {
+            collaborationProfile = try collaborationProfileRepository.load()
+            collaborationConversation = try collaborationConversationRepository.load()
+            isCollaborationPresented = true
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func closeCollaborationProfile() {
+        isCollaborationPresented = false
     }
 
     public func saveSettings(_ value: WorkstateSettings) {
@@ -395,6 +445,195 @@ public final class WorkstateViewModel: ObservableObject {
         }
     }
 
+    public func sendGlobalMessage(_ rawMessage: String) {
+        let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !isGlobalChatSending, !workspace.projects.isEmpty else { return }
+
+        let priorConversation = globalConversation
+        let userMessage = GlobalChatMessage(role: .user, text: message)
+        var pendingConversation = priorConversation
+        pendingConversation.messages.append(userMessage)
+        pendingConversation.updatedAt = Date()
+        do {
+            try globalConversationRepository.save(pendingConversation)
+            globalConversation = pendingConversation
+            isGlobalChatSending = true
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
+        let runtime = agentRuntime
+        let currentWorkspace = workspace
+        Task { [weak self] in
+            do {
+                let route = try await Task.detached(priority: .userInitiated) {
+                    try runtime.routeGlobalChat(
+                        message: message,
+                        recentMessages: Array(priorConversation.messages.suffix(12)),
+                        workspace: currentWorkspace
+                    )
+                }.value
+                guard let project = currentWorkspace.project(id: route.projectID) else {
+                    throw WorkstateStorageError.missingProject(route.projectID)
+                }
+                guard let self else { return }
+                var routedConversation = self.globalConversation
+                guard let userIndex = routedConversation.messages.firstIndex(where: {
+                    $0.id == userMessage.id
+                }) else {
+                    throw WorkstateStorageError.invalidState("Global chat lost the pending user message")
+                }
+                routedConversation.messages[userIndex].projectID = project.id
+                routedConversation.messages[userIndex].projectName = project.name
+                let previousProjectID = routedConversation.messages[..<userIndex]
+                    .last(where: { $0.role == .owner })?
+                    .projectID
+                if previousProjectID != nil, previousProjectID != project.id {
+                    routedConversation.messages.append(
+                        GlobalChatMessage(
+                            role: .system,
+                            text: "转给 \(project.name) Project Owner",
+                            projectID: project.id,
+                            projectName: project.name
+                        )
+                    )
+                }
+                routedConversation.updatedAt = Date()
+                try self.globalConversationRepository.save(routedConversation)
+                self.globalConversation = routedConversation
+
+                let projectHistory = priorConversation.messages
+                    .filter { $0.projectID == project.id && $0.role != .system }
+                    .suffix(16)
+                    .map {
+                        ProjectOwnerMessage(
+                            id: $0.id,
+                            role: $0.role == .user ? .user : .owner,
+                            text: $0.text,
+                            timestamp: $0.timestamp,
+                            topicID: $0.topicID
+                        )
+                    }
+                let response = try await Task.detached(priority: .userInitiated) {
+                    try runtime.ownerChat(
+                        project: project,
+                        history: Array(projectHistory),
+                        message: message
+                    )
+                }.value
+
+                let ownerMessage = GlobalChatMessage(
+                    role: .owner,
+                    text: response.reply,
+                    projectID: project.id,
+                    projectName: project.name
+                )
+                try self.applyOwnerTopicUpdates(
+                    response.topicUpdates,
+                    projectID: project.id,
+                    activeTopicID: nil,
+                    userMessageID: userMessage.id,
+                    ownerMessageID: ownerMessage.id
+                )
+
+                var completed = self.globalConversation
+                completed.messages.append(ownerMessage)
+                completed.updatedAt = Date()
+                try self.globalConversationRepository.save(completed)
+
+                var projectConversation = self.ownerConversation(for: project.id)
+                projectConversation.messages.append(
+                    ProjectOwnerMessage(
+                        id: userMessage.id,
+                        role: .user,
+                        text: message,
+                        timestamp: userMessage.timestamp
+                    )
+                )
+                projectConversation.messages.append(
+                    ProjectOwnerMessage(
+                        id: ownerMessage.id,
+                        role: .owner,
+                        text: ownerMessage.text,
+                        timestamp: ownerMessage.timestamp
+                    )
+                )
+                projectConversation.updatedAt = Date()
+                try self.ownerConversationRepository.save(projectConversation)
+                self.ownerConversations[project.id] = projectConversation
+                self.globalConversation = completed
+                self.isGlobalChatSending = false
+                self.errorMessage = nil
+            } catch {
+                guard let self else { return }
+                self.isGlobalChatSending = false
+                self.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func sendCollaborationMessage(_ rawMessage: String) {
+        let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !isCollaborationSending else { return }
+        let priorConversation = collaborationConversation
+        let userMessage = CollaborationMessage(role: .user, text: message)
+        var pending = priorConversation
+        pending.messages.append(userMessage)
+        pending.updatedAt = Date()
+        do {
+            try collaborationConversationRepository.save(pending)
+            collaborationConversation = pending
+            isCollaborationSending = true
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
+        let runtime = agentRuntime
+        let currentProfile = collaborationProfile
+        Task { [weak self] in
+            do {
+                let response = try await Task.detached(priority: .userInitiated) {
+                    try runtime.collaborationSteward(
+                        profile: currentProfile,
+                        history: Array(priorConversation.messages.suffix(16)),
+                        message: message
+                    )
+                }.value
+                guard let self else { return }
+                let updatedProfile = try self.applyingCollaborationMutations(
+                    response.mutations,
+                    to: self.collaborationProfile
+                )
+                var completed = self.collaborationConversation
+                completed.messages.append(
+                    CollaborationMessage(role: .owner, text: response.reply)
+                )
+                completed.updatedAt = Date()
+                try self.collaborationProfileRepository.save(updatedProfile)
+                try self.collaborationConversationRepository.save(completed)
+                self.collaborationProfile = updatedProfile
+                self.collaborationConversation = completed
+                self.isCollaborationSending = false
+                self.errorMessage = nil
+            } catch {
+                guard let self else { return }
+                self.isCollaborationSending = false
+                self.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func applyingCollaborationMutations(
+        _ mutations: [CollaborationProfileMutation],
+        to profile: CollaborationProfile
+    ) throws -> CollaborationProfile {
+        try CollaborationProfileApplier().apply(mutations, to: profile)
+    }
+
     public func saveTopic(_ topic: ProjectTopic, projectID: String) {
         do {
             workspace = try service.upsertTopic(
@@ -405,6 +644,7 @@ public final class WorkstateViewModel: ObservableObject {
                     summary: topic.summary,
                     status: topic.status,
                     kind: topic.kind,
+                    disposition: topic.disposition ?? .futureDecision,
                     currentUnderstanding: topic.currentUnderstanding,
                     proposedDirection: topic.proposedDirection,
                     deferredReason: topic.deferredReason,
@@ -445,6 +685,50 @@ public final class WorkstateViewModel: ObservableObject {
         }
     }
 
+    public func resolveTopic(
+        projectID: String,
+        topicID: String,
+        resolution: ProjectTopicResolution
+    ) {
+        do {
+            workspace = try service.resolveTopic(
+                ProjectTopicResolutionInput(
+                    projectID: projectID,
+                    topicID: topicID,
+                    resolution: resolution
+                )
+            )
+            lastModificationDate = repository.modificationDate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func copyHandoffPrompt(projectID: String) {
+        do {
+            let snapshot = try service.contextSnapshot(
+                projectID: projectID,
+                collaborationGuidance: collaborationProfile.activeGuidance
+            )
+            let handoff = try ContextHandoffExporter(root: repository.paths.root).export(snapshot)
+            NSPasteboard.general.clearContents()
+            guard NSPasteboard.general.setString(handoff.prompt, forType: .string) else {
+                throw WorkstateStorageError.invalidState("Cannot write handoff prompt to clipboard")
+            }
+            copiedHandoffProjectID = projectID
+            errorMessage = nil
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                if self?.copiedHandoffProjectID == projectID {
+                    self?.copiedHandoffProjectID = nil
+                }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func applyOwnerTopicUpdates(
         _ updates: [ProjectOwnerTopicUpdate],
         projectID: String,
@@ -456,6 +740,7 @@ public final class WorkstateViewModel: ObservableObject {
             guard update.action == "create" || update.action == "update",
                   let status = ProjectTopicStatus(rawValue: update.status),
                   let kind = ProjectTopicKind(rawValue: update.kind),
+                  let disposition = ProjectTopicDisposition(rawValue: update.disposition),
                   let noteKind = ProjectTopicNoteKind(rawValue: update.noteKind) else {
                 throw WorkstateStorageError.invalidState("Owner returned an unsupported topic update")
             }
@@ -475,6 +760,7 @@ public final class WorkstateViewModel: ObservableObject {
                     summary: update.summary,
                     status: status,
                     kind: kind,
+                    disposition: disposition,
                     currentUnderstanding: update.currentUnderstanding,
                     proposedDirection: update.proposedDirection,
                     deferredReason: update.deferredReason,

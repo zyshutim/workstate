@@ -92,7 +92,7 @@ public struct AgentRuntimeClient: Sendable {
         let request = BatchRouteRequest(
             mode: "batch_route",
             profile: try runtimeProfile(.route),
-            segments: segments,
+            segments: segments.map(BatchRouteSegmentPayload.init),
             projects: workspace.projects.map(PortfolioProjectPayload.init),
             routeHints: routeHints.map {
                 BatchRouteHintPayload(threadID: $0.key, projectID: $0.value)
@@ -131,6 +131,38 @@ public struct AgentRuntimeClient: Sendable {
         try appendRun(envelope, segmentID: segment.id)
         try appendDecision(envelope, segmentID: segment.id)
         return envelope.result
+    }
+
+    public func stewardBatch(
+        segments: [SessionSegment],
+        project: ProjectRecord,
+        scanner: CodexSessionScanner
+    ) throws -> [BatchStewardDecision] {
+        guard !segments.isEmpty else { return [] }
+        let request = BatchStewardRequest(
+            mode: "batch_steward",
+            profile: try runtimeProfile(.steward),
+            segments: segments,
+            project: StewardProjectPayload(project: project)
+        )
+        let envelope: RuntimeEnvelope<BatchStewardResult> = try run(request, timeout: 600)
+        try scanner.excludeThread(envelope.runtimeThreadId)
+        try appendRun(
+            envelope,
+            segmentID: "batch-steward:\(segments.first!.id):\(segments.count)"
+        )
+        try appendDecision(
+            envelope,
+            segmentID: "batch-steward:\(segments.first!.id):\(segments.count)"
+        )
+        let expected = segments.map(\.id)
+        let actual = envelope.result.decisions.map(\.segmentId)
+        guard actual == expected, Set(actual).count == actual.count else {
+            throw WorkstateStorageError.invalidState(
+                "Batch Steward did not return exactly one ordered decision for every segment"
+            )
+        }
+        return envelope.result.decisions
     }
 
     public func rebuild(
@@ -200,6 +232,59 @@ public struct AgentRuntimeClient: Sendable {
         return ProjectOwnerChatResponse(
             reply: envelope.result.reply,
             topicUpdates: envelope.result.topicUpdates,
+            runtimeThreadID: envelope.runtimeThreadId
+        )
+    }
+
+    public func routeGlobalChat(
+        message: String,
+        recentMessages: [GlobalChatMessage],
+        workspace: WorkspaceSnapshot
+    ) throws -> GlobalChatRouteResponse {
+        let request = GlobalChatRouteRequest(
+            mode: "global_chat_route",
+            profile: try runtimeProfile(.route),
+            message: message,
+            recentMessages: recentMessages,
+            projects: workspace.projects.map(PortfolioProjectPayload.init)
+        )
+        let envelope: RuntimeEnvelope<GlobalChatRouteResult> = try run(request, timeout: 300)
+        try CodexSessionScanner().excludeThread(envelope.runtimeThreadId)
+        guard workspace.project(id: envelope.result.projectId) != nil else {
+            throw WorkstateStorageError.invalidState(
+                "Global chat Router returned unknown project \(envelope.result.projectId)"
+            )
+        }
+        let segmentID = "global-chat-route:\(UUID().uuidString.lowercased())"
+        try appendRun(envelope, segmentID: segmentID)
+        try appendDecision(envelope, segmentID: segmentID)
+        return GlobalChatRouteResponse(
+            projectID: envelope.result.projectId,
+            reason: envelope.result.reason,
+            runtimeThreadID: envelope.runtimeThreadId
+        )
+    }
+
+    public func collaborationSteward(
+        profile: CollaborationProfile,
+        history: [CollaborationMessage],
+        message: String
+    ) throws -> CollaborationStewardResponse {
+        let request = CollaborationStewardRequest(
+            mode: "collaboration_steward",
+            profile: try runtimeProfile(.collaborationSteward),
+            collaborationProfile: profile,
+            history: history,
+            message: message
+        )
+        let envelope: RuntimeEnvelope<CollaborationStewardResult> = try run(request, timeout: 300)
+        try CodexSessionScanner().excludeThread(envelope.runtimeThreadId)
+        let segmentID = "collaboration-steward:\(UUID().uuidString.lowercased())"
+        try appendRun(envelope, segmentID: segmentID)
+        try appendDecision(envelope, segmentID: segmentID)
+        return CollaborationStewardResponse(
+            reply: envelope.result.reply,
+            mutations: envelope.result.mutations,
             runtimeThreadID: envelope.runtimeThreadId
         )
     }
@@ -521,11 +606,68 @@ public struct StewardResult: Codable, Equatable, Sendable {
     public var worklineTitle: String
     public var worklineObjective: String
     public var branchFromWorklineId: String
+    public var isParallel: Bool?
+    public var nextFocusedWorklineId: String?
+    public var closureDisposition: String?
+    public var carryoverTitle: String?
+    public var carryoverSummary: String?
+    public var carryoverQuestions: [String]?
     public var kind: String
     public var stage: String
     public var delivery: String
     public var facts: [String]
     public var openIssues: [String]
+
+    public init(
+        classification: String,
+        title: String,
+        summary: String,
+        worklineAction: String,
+        worklineId: String,
+        worklineTitle: String,
+        worklineObjective: String,
+        branchFromWorklineId: String,
+        isParallel: Bool? = nil,
+        nextFocusedWorklineId: String? = nil,
+        closureDisposition: String? = nil,
+        carryoverTitle: String? = nil,
+        carryoverSummary: String? = nil,
+        carryoverQuestions: [String]? = nil,
+        kind: String,
+        stage: String,
+        delivery: String,
+        facts: [String],
+        openIssues: [String]
+    ) {
+        self.classification = classification
+        self.title = title
+        self.summary = summary
+        self.worklineAction = worklineAction
+        self.worklineId = worklineId
+        self.worklineTitle = worklineTitle
+        self.worklineObjective = worklineObjective
+        self.branchFromWorklineId = branchFromWorklineId
+        self.isParallel = isParallel
+        self.nextFocusedWorklineId = nextFocusedWorklineId
+        self.closureDisposition = closureDisposition
+        self.carryoverTitle = carryoverTitle
+        self.carryoverSummary = carryoverSummary
+        self.carryoverQuestions = carryoverQuestions
+        self.kind = kind
+        self.stage = stage
+        self.delivery = delivery
+        self.facts = facts
+        self.openIssues = openIssues
+    }
+}
+
+public struct BatchStewardDecision: Codable, Equatable, Sendable {
+    public var segmentId: String
+    public var result: StewardResult
+}
+
+public struct BatchStewardResult: Codable, Equatable, Sendable {
+    public var decisions: [BatchStewardDecision]
 }
 
 public struct DistillationResult: Codable, Equatable, Sendable {
@@ -543,6 +685,28 @@ public struct ProjectOwnerChatResponse: Equatable, Sendable {
     public var runtimeThreadID: String
 }
 
+public struct GlobalChatRouteResponse: Equatable, Sendable {
+    public var projectID: String
+    public var reason: String
+    public var runtimeThreadID: String
+}
+
+public struct CollaborationStewardResponse: Equatable, Sendable {
+    public var reply: String
+    public var mutations: [CollaborationProfileMutation]
+    public var runtimeThreadID: String
+}
+
+private struct CollaborationStewardResult: Codable {
+    var reply: String
+    var mutations: [CollaborationProfileMutation]
+}
+
+private struct GlobalChatRouteResult: Codable {
+    var projectId: String
+    var reason: String
+}
+
 public struct ProjectOwnerTopicUpdate: Codable, Equatable, Sendable {
     public var action: String
     public var topicId: String
@@ -550,6 +714,7 @@ public struct ProjectOwnerTopicUpdate: Codable, Equatable, Sendable {
     public var summary: String
     public var status: String
     public var kind: String
+    public var disposition: String
     public var currentUnderstanding: String
     public var proposedDirection: String
     public var deferredReason: String
@@ -620,9 +785,27 @@ private struct RouteRequest: Codable {
 private struct BatchRouteRequest: Codable {
     var mode: String
     var profile: RuntimeProfilePayload
-    var segments: [SessionSegment]
+    var segments: [BatchRouteSegmentPayload]
     var projects: [PortfolioProjectPayload]
     var routeHints: [BatchRouteHintPayload]
+}
+
+private struct BatchRouteSegmentPayload: Codable {
+    var id: String
+    var threadID: String
+    var turnID: String
+    var cwd: String
+    var userText: String
+    var timestamp: Date
+
+    init(segment: SessionSegment) {
+        id = segment.id
+        threadID = segment.threadID
+        turnID = segment.turnID
+        cwd = segment.cwd
+        userText = segment.userText
+        timestamp = segment.timestamp
+    }
 }
 
 private struct BatchRouteHintPayload: Codable {
@@ -671,6 +854,13 @@ private struct StewardRequest: Codable {
     var project: StewardProjectPayload
 }
 
+private struct BatchStewardRequest: Codable {
+    var mode: String
+    var profile: RuntimeProfilePayload
+    var segments: [SessionSegment]
+    var project: StewardProjectPayload
+}
+
 private struct RebuildRequest: Codable {
     var mode: String
     var profile: RuntimeProfilePayload
@@ -695,6 +885,22 @@ private struct OwnerChatRequest: Codable {
     var history: [ProjectOwnerMessage]
     var message: String
     var activeTopicId: String
+}
+
+private struct GlobalChatRouteRequest: Codable {
+    var mode: String
+    var profile: RuntimeProfilePayload
+    var message: String
+    var recentMessages: [GlobalChatMessage]
+    var projects: [PortfolioProjectPayload]
+}
+
+private struct CollaborationStewardRequest: Codable {
+    var mode: String
+    var profile: RuntimeProfilePayload
+    var collaborationProfile: CollaborationProfile
+    var history: [CollaborationMessage]
+    var message: String
 }
 
 private struct BriefRequest: Codable {
@@ -750,6 +956,7 @@ private struct ProjectPayload: Codable {
     var summary: String
     var purpose: String
     var status: String
+    var focusedWorklineId: String
     var activeWorklines: [WorklinePayload]
 
     init(project: ProjectRecord) {
@@ -758,6 +965,7 @@ private struct ProjectPayload: Codable {
         summary = project.context.currentSummary
         purpose = project.context.purpose
         status = project.status.rawValue
+        focusedWorklineId = project.focusedTaskID ?? ""
         activeWorklines = project.tasks
             .filter { $0.status != .completed && $0.status != .abandoned }
             .sorted { $0.updatedAt > $1.updatedAt }
@@ -771,6 +979,7 @@ private struct StewardProjectPayload: Codable {
     var summary: String
     var purpose: String
     var status: String
+    var focusedWorklineId: String
     var activeWorklines: [WorklinePayload]
     var currentUnderstanding: [String]
     var acceptedDecisions: [String]
@@ -785,6 +994,7 @@ private struct StewardProjectPayload: Codable {
         summary = project.context.currentSummary
         purpose = project.context.purpose
         status = project.status.rawValue
+        focusedWorklineId = project.focusedTaskID ?? ""
         activeWorklines = project.tasks
             .filter { $0.status != .completed && $0.status != .abandoned }
             .sorted { $0.updatedAt > $1.updatedAt }
@@ -811,6 +1021,7 @@ private struct TopicPayload: Codable {
     var summary: String
     var status: String
     var kind: String
+    var disposition: String
     var currentUnderstanding: String
     var proposedDirection: String
     var openQuestions: [String]
@@ -821,6 +1032,7 @@ private struct TopicPayload: Codable {
         summary = topic.summary
         status = topic.status.rawValue
         kind = topic.kind.rawValue
+        disposition = (topic.disposition ?? .futureDecision).rawValue
         currentUnderstanding = topic.currentUnderstanding
         proposedDirection = topic.proposedDirection
         openQuestions = topic.openQuestions

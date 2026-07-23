@@ -47,19 +47,44 @@ package struct ProjectTimelineLayout {
                 return $0.timestamp < $1.timestamp
             }
 
-        let primaryTaskID = project.tasks
-            .filter { $0.status == .active || $0.status == .waiting }
+        let openTasks = project.tasks
+            .filter { $0.status == .active }
+        let primaryTaskID = project.focusedTaskID
+            .flatMap { focusedID in openTasks.first(where: { $0.id == focusedID })?.id }
+            ?? openTasks
             .sorted {
-                if $0.startedAt == $1.startedAt { return $0.id < $1.id }
-                return $0.startedAt < $1.startedAt
+                if $0.updatedAt == $1.updatedAt { return $0.id < $1.id }
+                return $0.updatedAt > $1.updatedAt
             }
             .first?.id
             ?? project.tasks.max { $0.updatedAt < $1.updatedAt }?.id
 
         let eventIndex = Dictionary(uniqueKeysWithValues: chronologicalEvents.enumerated().map { ($0.element.id, $0.offset) })
+        let taskEnd: (TaskRecord) -> Date = { task in
+            if let completedAt = task.completedAt { return completedAt }
+            if task.status == .waiting || task.status == .parked { return task.updatedAt }
+            return max(task.updatedAt, project.lastActivityAt)
+        }
+        let overlaps: (TaskRecord, TaskRecord) -> Bool = { left, right in
+            left.startedAt <= taskEnd(right) && right.startedAt <= taskEnd(left)
+        }
+        let primaryTask = primaryTaskID.flatMap { id in
+            project.tasks.first(where: { $0.id == id })
+        }
         let branchTasks = project.tasks
             .filter { task in
-                task.id != primaryTaskID && chronologicalEvents.contains(where: { $0.taskID == task.id })
+                guard task.id != primaryTaskID,
+                      chronologicalEvents.contains(where: { $0.taskID == task.id }) else {
+                    return false
+                }
+                if let primaryTask, overlaps(task, primaryTask) {
+                    return true
+                }
+                return project.tasks.contains { other in
+                    other.id != task.id
+                        && other.startedAt < task.startedAt
+                        && overlaps(task, other)
+                }
             }
             .sorted {
                 if $0.startedAt == $1.startedAt { return $0.id < $1.id }

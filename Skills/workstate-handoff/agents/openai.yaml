@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workstate Handoff"
+  short_description: "Load current project context when work changes hands"
+  default_prompt: "Load the relevant Workstate handoff snapshot, summarize the recovered scope briefly, and continue the task."

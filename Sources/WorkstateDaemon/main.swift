@@ -18,10 +18,12 @@ struct WorkstateDaemon {
         let orchestrator = WorkstateOrchestrator(service: service, scanner: scanner, runtime: runtime)
         let briefComposer = BriefCompositionService(runtime: runtime, scanner: scanner)
         _ = try AutomationRecovery(service: service, scanner: scanner).run()
+        _ = try scanner.recoverInterruptedProcessing()
 
         if runsOnce {
             try autoreleasepool {
                 let settings = try currentSettings(repository: settingsRepository, service: service)
+                try discardDisabledPeriod(scanner: scanner, settings: settings)
                 _ = try scanner.scan(minimumTimestamp: monitoringCutoff(settings))
                 try updateLiveActivities(
                     repository: liveActivities,
@@ -47,8 +49,10 @@ struct WorkstateDaemon {
         }
 
         let changes = SessionChangeQueue()
+        let pendingScheduler = PendingProcessingScheduler(changes: changes)
         let watcher = CodexSessionWatcher(root: scanner.sessionsRoot) { batch in
             changes.enqueue(batch)
+            pendingScheduler.schedule()
         }
         let signals = SignalMonitor(runtime: runtime, changes: changes)
         let briefScheduler = DailyBriefScheduler(changes: changes)
@@ -56,6 +60,7 @@ struct WorkstateDaemon {
         try watcher.start()
         defer {
             watcher.stop()
+            pendingScheduler.stop()
             briefScheduler.stop()
             signals.stop()
             runtime.cancelActiveProcess()
@@ -70,6 +75,7 @@ struct WorkstateDaemon {
                     detail: "正在检查会话状态"
                 )
                 let settings = try currentSettings(repository: settingsRepository, service: service)
+                try discardDisabledPeriod(scanner: scanner, settings: settings)
                 _ = try scanner.scan(minimumTimestamp: monitoringCutoff(settings))
                 try updateLiveActivities(
                     repository: liveActivities,
@@ -118,6 +124,7 @@ struct WorkstateDaemon {
                             repository: settingsRepository,
                             service: service
                         )
+                        try discardDisabledPeriod(scanner: scanner, settings: settings)
                         try setDaemonState(
                             repository: daemonStatus,
                             scanner: scanner,
@@ -137,6 +144,24 @@ struct WorkstateDaemon {
                             projector: liveProjector,
                             scanner: scanner,
                             workspace: service.snapshot()
+                        )
+                        if settings.setupCompleted && settings.liveMonitoringEnabled {
+                            try setPendingState(
+                                repository: daemonStatus,
+                                scanner: scanner
+                            )
+                        } else {
+                            try setMonitoringPausedState(
+                                repository: daemonStatus,
+                                scanner: scanner,
+                                setupCompleted: settings.setupCompleted
+                            )
+                        }
+                    }
+                    if changes.consumeScheduledPendingProcessing() {
+                        let settings = try currentSettings(
+                            repository: settingsRepository,
+                            service: service
                         )
                         if settings.setupCompleted && settings.liveMonitoringEnabled {
                             try processPending(
@@ -179,6 +204,28 @@ struct WorkstateDaemon {
         )
     }
 
+    private static func setPendingState(
+        repository: DaemonStatusRepository,
+        scanner: CodexSessionScanner
+    ) throws {
+        let pendingCount = try scanner.pendingSegments().count
+        if pendingCount == 0 {
+            try setDaemonState(
+                repository: repository,
+                scanner: scanner,
+                activity: .idle,
+                detail: "正在监听 Codex 会话"
+            )
+        } else {
+            try setDaemonState(
+                repository: repository,
+                scanner: scanner,
+                activity: .idle,
+                detail: "已记录 \(pendingCount) 个新对话片段，等待会话告一段落"
+            )
+        }
+    }
+
     private static func processPending(
         orchestrator: WorkstateOrchestrator,
         status: DaemonStatusRepository,
@@ -200,7 +247,7 @@ struct WorkstateDaemon {
             activity: .analyzing,
             detail: "正在分析 \(segments.count) 个新对话片段"
         )
-        let summary = try orchestrator.process(segments)
+        let summary = try orchestrator.processBacklog(segments)
         let detail: String
         let activity: DaemonActivity
         if summary.failed > 0 {
@@ -231,6 +278,18 @@ struct WorkstateDaemon {
             return .distantFuture
         }
         return settings.liveMonitoringStartedAt
+    }
+
+    private static func discardDisabledPeriod(
+        scanner: CodexSessionScanner,
+        settings: WorkstateSettings
+    ) throws {
+        guard settings.setupCompleted,
+              settings.liveMonitoringEnabled,
+              let cutoff = settings.liveMonitoringStartedAt else {
+            return
+        }
+        _ = try scanner.discardUnprocessed(before: cutoff)
     }
 
     private static func setMonitoringPausedState(
@@ -307,6 +366,7 @@ private final class SessionChangeQueue: @unchecked Sendable {
     private let condition = NSCondition()
     private var paths = Set<String>()
     private var requiresFullScan = false
+    private var scheduledPendingProcessing = false
     private var scheduledBrief = false
     private var stopped = false
 
@@ -318,6 +378,7 @@ private final class SessionChangeQueue: @unchecked Sendable {
         }
         paths.formUnion(batch.paths)
         requiresFullScan = requiresFullScan || batch.requiresFullScan
+        scheduledPendingProcessing = false
         condition.signal()
         condition.unlock()
     }
@@ -325,7 +386,11 @@ private final class SessionChangeQueue: @unchecked Sendable {
     func wait() -> SessionChangeBatch? {
         condition.lock()
         defer { condition.unlock() }
-        while !stopped && paths.isEmpty && !requiresFullScan && !scheduledBrief {
+        while !stopped
+            && paths.isEmpty
+            && !requiresFullScan
+            && !scheduledPendingProcessing
+            && !scheduledBrief {
             condition.wait()
         }
         guard !stopped else { return nil }
@@ -336,6 +401,25 @@ private final class SessionChangeQueue: @unchecked Sendable {
         paths.removeAll(keepingCapacity: true)
         requiresFullScan = false
         return batch
+    }
+
+    func enqueueScheduledPendingProcessing() {
+        condition.lock()
+        guard !stopped else {
+            condition.unlock()
+            return
+        }
+        scheduledPendingProcessing = true
+        condition.signal()
+        condition.unlock()
+    }
+
+    func consumeScheduledPendingProcessing() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let value = scheduledPendingProcessing
+        scheduledPendingProcessing = false
+        return value
     }
 
     func enqueueScheduledBrief() {
@@ -362,6 +446,49 @@ private final class SessionChangeQueue: @unchecked Sendable {
         stopped = true
         condition.broadcast()
         condition.unlock()
+    }
+}
+
+private final class PendingProcessingScheduler: @unchecked Sendable {
+    private let changes: SessionChangeQueue
+    private let quietInterval: TimeInterval
+    private let queue = DispatchQueue(label: "com.timshu.workstate.pending-processing")
+    private var timer: DispatchSourceTimer?
+
+    init(
+        changes: SessionChangeQueue,
+        quietInterval: TimeInterval = 5 * 60
+    ) {
+        self.changes = changes
+        self.quietInterval = quietInterval
+    }
+
+    func schedule() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let source: DispatchSourceTimer
+            if let timer {
+                source = timer
+            } else {
+                source = DispatchSource.makeTimerSource(queue: queue)
+                source.setEventHandler { [weak self] in
+                    self?.changes.enqueueScheduledPendingProcessing()
+                }
+                timer = source
+                source.resume()
+            }
+            source.schedule(
+                deadline: .now() + quietInterval,
+                leeway: .seconds(5)
+            )
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            timer?.cancel()
+            timer = nil
+        }
     }
 }
 

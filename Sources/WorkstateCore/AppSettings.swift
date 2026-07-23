@@ -6,6 +6,7 @@ public enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case distill
     case rebuild
     case ownerChat = "owner_chat"
+    case collaborationSteward = "collaboration_steward"
     case brief
 
     public var id: String { rawValue }
@@ -17,6 +18,7 @@ public enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
         case .distill: "历史分段整理"
         case .rebuild: "冷启动重建"
         case .ownerChat: "Project Owner 对话"
+        case .collaborationSteward: "协作习惯维护"
         case .brief: "日报总结"
         }
     }
@@ -28,6 +30,7 @@ public enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
         case .distill: "把较长的历史记录整理成完整证据"
         case .rebuild: "从历史证据建立项目当前状态"
         case .ownerChat: "讨论议题、待办和产品方向"
+        case .collaborationSteward: "维护 Persona、Rules 和 Loops"
         case .brief: "整理上一工作日的项目摘要"
         }
     }
@@ -88,6 +91,7 @@ public struct WorkstateSettings: Codable, Equatable, Sendable {
         .distill: AgentProfile(modelID: "gpt-5.6-terra", effort: .medium),
         .rebuild: AgentProfile(modelID: "gpt-5.6-sol", effort: .high),
         .ownerChat: AgentProfile(modelID: "gpt-5.6-sol", effort: .medium),
+        .collaborationSteward: AgentProfile(modelID: "gpt-5.6-sol", effort: .medium),
         .brief: AgentProfile(modelID: "gpt-5.6-sol", effort: .medium)
     ]
 
@@ -107,9 +111,13 @@ public struct WorkstateSettingsRepository: Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else {
             var settings = WorkstateSettings()
             settings.setupCompleted = workspaceHasProjects
+            if settings.setupCompleted && settings.liveMonitoringEnabled {
+                settings.liveMonitoringStartedAt = Date()
+                try save(settings)
+            }
             return settings
         }
-        let settings = try WorkstateCoding.makeDecoder().decode(
+        var settings = try WorkstateCoding.makeDecoder().decode(
             WorkstateSettings.self,
             from: Data(contentsOf: url)
         )
@@ -117,6 +125,21 @@ public struct WorkstateSettingsRepository: Sendable {
             throw WorkstateStorageError.invalidState(
                 "Unsupported Workstate settings schema \(settings.schemaVersion)"
             )
+        }
+        var requiresSave = false
+        for role in AgentRole.allCases where settings.agentProfiles[role] == nil {
+            settings.agentProfiles[role] = WorkstateSettings.defaultProfiles[role]
+            requiresSave = true
+        }
+        if settings.setupCompleted,
+           settings.liveMonitoringEnabled,
+           settings.liveMonitoringStartedAt == nil {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            settings.liveMonitoringStartedAt = attributes[.modificationDate] as? Date ?? Date()
+            requiresSave = true
+        }
+        if requiresSave {
+            try save(settings)
         }
         return settings
     }

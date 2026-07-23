@@ -13,6 +13,7 @@ public struct SessionSegment: Codable, Equatable, Identifiable, Sendable {
     public var userText: String
     public var assistantText: String
     public var timestamp: Date
+    public var relatedTurnIDs: [String]?
 
     public init(
         threadID: String,
@@ -23,7 +24,8 @@ public struct SessionSegment: Codable, Equatable, Identifiable, Sendable {
         cwd: String,
         userText: String,
         assistantText: String,
-        timestamp: Date
+        timestamp: Date,
+        relatedTurnIDs: [String]? = nil
     ) {
         id = "\(threadID):\(turnID)"
         self.threadID = threadID
@@ -35,6 +37,7 @@ public struct SessionSegment: Codable, Equatable, Identifiable, Sendable {
         self.userText = userText
         self.assistantText = assistantText
         self.timestamp = timestamp
+        self.relatedTurnIDs = relatedTurnIDs
     }
 }
 
@@ -587,6 +590,38 @@ public struct CodexSessionScanner: Sendable {
         }
     }
 
+    @discardableResult
+    public func recoverInterruptedProcessing() throws -> Int {
+        try synchronized {
+            var state = try loadStateUnlocked()
+            var records = state.processingRecords ?? [:]
+            var recovered = 0
+            for segmentID in state.pendingSegmentIDs {
+                guard var record = records[segmentID] else { continue }
+                switch record.stage {
+                case .routing:
+                    record.stage = record.route == nil ? .queued : .routed
+                case .stewarding:
+                    record.stage = record.steward == nil ? .routed : .stewarded
+                case .applying:
+                    record.stage = record.steward == nil ? .routed : .stewarded
+                default:
+                    continue
+                }
+                record.failedStage = nil
+                record.error = ""
+                record.updatedAt = Date()
+                records[segmentID] = record
+                recovered += 1
+            }
+            if recovered > 0 {
+                state.processingRecords = records
+                try saveState(state)
+            }
+            return recovered
+        }
+    }
+
     public func replacePending(segmentIDs: [String]) throws {
         try synchronized {
             var state = try loadState()
@@ -728,6 +763,32 @@ public struct CodexSessionScanner: Sendable {
         try synchronized {
             let state = try loadState()
             return try loadPendingSegments(ids: state.pendingSegmentIDs)
+        }
+    }
+
+    @discardableResult
+    public func discardUnprocessed(before cutoff: Date) throws -> Int {
+        try synchronized {
+            var state = try loadStateUnlocked()
+            let pendingIDs = Set(state.pendingSegmentIDs)
+            guard !pendingIDs.isEmpty else { return 0 }
+
+            let segments = try loadPendingSegments(ids: state.pendingSegmentIDs)
+            let discardedIDs = Set(segments.compactMap { segment -> String? in
+                effectiveTimestamp(for: segment) < cutoff ? segment.id : nil
+            })
+            guard !discardedIDs.isEmpty else { return 0 }
+
+            state.pendingSegmentIDs.removeAll { discardedIDs.contains($0) }
+            if var records = state.processingRecords {
+                for id in discardedIDs {
+                    records.removeValue(forKey: id)
+                }
+                state.processingRecords = records
+            }
+            try rewriteEvidence(excluding: discardedIDs)
+            try saveState(state)
+            return discardedIDs.count
         }
     }
 
@@ -1028,7 +1089,9 @@ public struct CodexSessionScanner: Sendable {
                   !assistantText.isEmpty else {
                 return nil
             }
-            let timestamp = parseTimestamp(object["timestamp"] as? String) ?? Date()
+            let timestamp = Self.timestamp(fromTimeOrderedID: turnID)
+                ?? parseTimestamp(object["timestamp"] as? String)
+                ?? Date()
             let segment = SessionSegment(
                 threadID: cursor.threadID,
                 turnID: turnID,
@@ -1072,6 +1135,40 @@ public struct CodexSessionScanner: Sendable {
             }
             offset += UInt64(data.count)
         }
+    }
+
+    private func rewriteEvidence(excluding excludedIDs: Set<String>) throws {
+        guard !excludedIDs.isEmpty,
+              FileManager.default.fileExists(atPath: evidenceURL.path) else {
+            return
+        }
+        let temporaryURL = evidenceURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(evidenceURL.lastPathComponent).\(UUID().uuidString).tmp")
+        FileManager.default.createFile(atPath: temporaryURL.path, contents: nil)
+        let output = try FileHandle(forWritingTo: temporaryURL)
+        do {
+            _ = try streamRelevantLines(in: evidenceURL, markers: []) { line in
+                let segment = try WorkstateCoding.makeDecoder().decode(
+                    SessionSegment.self,
+                    from: line.data
+                )
+                guard !excludedIDs.contains(segment.id) else { return }
+                try output.write(contentsOf: line.data)
+                try output.write(contentsOf: Data([0x0A]))
+            }
+            try output.close()
+            _ = try FileManager.default.replaceItemAt(evidenceURL, withItemAt: temporaryURL)
+            storage.evidenceLocations = nil
+        } catch {
+            try? output.close()
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+    }
+
+    private func effectiveTimestamp(for segment: SessionSegment) -> Date {
+        Self.timestamp(fromTimeOrderedID: segment.turnID) ?? segment.timestamp
     }
 
     private func loadPendingSegments(ids: [String]) throws -> [SessionSegment] {

@@ -73,6 +73,56 @@ struct WorkstateSnapshot {
                 )
             )
         }
+        if mode == "global-chat" {
+            try GlobalConversationRepository(root: repository.paths.root).save(
+                GlobalConversation(
+                    messages: [
+                        GlobalChatMessage(
+                            role: .user,
+                            text: "素材图谱里这个交互先记成议题，等我有空再继续。",
+                            projectID: "reframe-material-graph",
+                            projectName: "Reframe · 素材图谱"
+                        ),
+                        GlobalChatMessage(
+                            role: .owner,
+                            text: "我会先保留你的原话，并把它放进素材图谱项目的待讨论议题。现在不会把它当成已确认需求。",
+                            projectID: "reframe-material-graph",
+                            projectName: "Reframe · 素材图谱"
+                        )
+                    ]
+                )
+            )
+        }
+        if mode == "collaboration" {
+            try CollaborationProfileRepository(root: repository.paths.root).save(
+                CollaborationProfile(
+                    entries: [
+                        CollaborationProfileEntry(
+                            id: "direct-language",
+                            kind: .preference,
+                            status: .active,
+                            title: "简洁、直接、使用现有术语",
+                            detail: "先说结论与可见后果，避免无必要复述。",
+                            evidence: ["你能不能说简单点，我看不进去"]
+                        ),
+                        CollaborationProfileEntry(
+                            id: "evidence-first",
+                            kind: .rule,
+                            status: .active,
+                            title: "先看真实状态再下结论",
+                            detail: "区分已验证事实、推断和待确认内容。"
+                        ),
+                        CollaborationProfileEntry(
+                            id: "possible-pattern",
+                            kind: .loop,
+                            status: .candidate,
+                            title: "候选：短反馈回路",
+                            detail: "先做代表性样本，再决定是否扩展。"
+                        )
+                    ]
+                )
+            )
+        }
         let model = WorkstateViewModel(repository: repository)
 
         if mode != "graph" && mode != "projects" && mode != "reviews" && mode != "brief" {
@@ -97,6 +147,12 @@ struct WorkstateSnapshot {
         }
         if mode == "brief" {
             model.presentDailyBrief()
+        }
+        if mode == "global-chat" {
+            model.presentGlobalChat()
+        }
+        if mode == "collaboration" {
+            model.presentCollaborationProfile()
         }
 
         let view = WorkstateRootView(model: model)

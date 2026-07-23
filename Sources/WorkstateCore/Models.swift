@@ -152,6 +152,16 @@ public enum ProjectTopicKind: String, Codable, CaseIterable, Sendable {
     case backend
 }
 
+public enum ProjectTopicDisposition: String, Codable, CaseIterable, Sendable {
+    case futureDecision
+    case awaitingVerification
+}
+
+public enum ProjectTopicResolution: String, Codable, CaseIterable, Sendable {
+    case completed
+    case cancelled
+}
+
 public enum ProjectTopicPromotionKind: String, Codable, CaseIterable, Sendable {
     case decision
     case task
@@ -201,6 +211,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
     public var lastActivityAt: Date
     public var graphPosition: GraphPosition
     public var context: ProjectContext
+    public var focusedTaskID: String?
     public var tasks: [TaskRecord]
     public var events: [ProjectEvent]
     public var topics: [ProjectTopic]
@@ -217,6 +228,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
         lastActivityAt: Date = Date(),
         graphPosition: GraphPosition = .init(x: 0, y: 0),
         context: ProjectContext = .init(),
+        focusedTaskID: String? = nil,
         tasks: [TaskRecord] = [],
         events: [ProjectEvent] = [],
         topics: [ProjectTopic] = [],
@@ -232,6 +244,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
         self.lastActivityAt = lastActivityAt
         self.graphPosition = graphPosition
         self.context = context
+        self.focusedTaskID = focusedTaskID
         self.tasks = tasks
         self.events = events
         self.topics = topics
@@ -273,6 +286,8 @@ public struct ProjectTopic: Codable, Equatable, Identifiable, Sendable {
     public var summary: String
     public var status: ProjectTopicStatus
     public var kind: ProjectTopicKind
+    public var disposition: ProjectTopicDisposition?
+    public var resolution: ProjectTopicResolution?
     public var currentUnderstanding: String
     public var proposedDirection: String
     public var deferredReason: String
@@ -292,6 +307,8 @@ public struct ProjectTopic: Codable, Equatable, Identifiable, Sendable {
         summary: String,
         status: ProjectTopicStatus = .captured,
         kind: ProjectTopicKind = .product,
+        disposition: ProjectTopicDisposition? = .futureDecision,
+        resolution: ProjectTopicResolution? = nil,
         currentUnderstanding: String,
         proposedDirection: String = "",
         deferredReason: String = "",
@@ -310,6 +327,8 @@ public struct ProjectTopic: Codable, Equatable, Identifiable, Sendable {
         self.summary = summary
         self.status = status
         self.kind = kind
+        self.disposition = disposition
+        self.resolution = resolution
         self.currentUnderstanding = currentUnderstanding
         self.proposedDirection = proposedDirection
         self.deferredReason = deferredReason
@@ -839,7 +858,7 @@ public extension ProjectRecord {
     }
 
     var activeTasks: [TaskRecord] {
-        tasks.filter { $0.status == .active || $0.status == .waiting }
+        tasks.filter { $0.status == .active }
     }
 
     func task(id: String) -> TaskRecord? {

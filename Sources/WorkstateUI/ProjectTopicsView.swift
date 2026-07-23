@@ -57,7 +57,36 @@ extension ProjectTopicKind: Identifiable {
     }
 }
 
+extension ProjectTopicDisposition: Identifiable {
+    public var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .futureDecision: "待决策"
+        case .awaitingVerification: "待验证"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .futureDecision: "questionmark.circle"
+        case .awaitingVerification: "clock.badge.questionmark"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .futureDecision: WorkstateTheme.warning
+        case .awaitingVerification: WorkstateTheme.activeState
+        }
+    }
+}
+
 extension ProjectTopic {
+    var effectiveDisposition: ProjectTopicDisposition {
+        disposition ?? .futureDecision
+    }
+
     var discussionContext: String {
         let questions = openQuestions.map { "- \($0)" }.joined(separator: "\n")
         let sourceText = sourceIDs.map { "- \($0)" }.joined(separator: "\n")
@@ -150,6 +179,7 @@ struct ProjectTopicsPage: View {
     let onAddTopic: () -> Void
     let onDiscussTopic: (String) -> Void
     let onPromoteTopic: (String, ProjectTopicPromotionKind, String, String) -> Void
+    let onResolveTopic: (String, ProjectTopicResolution) -> Void
 
     private var selectedTopic: ProjectTopic? {
         selectedTopicID.flatMap { id in topics.first { $0.id == id } }
@@ -169,6 +199,9 @@ struct ProjectTopicsPage: View {
                     onDiscuss: { onDiscussTopic(selectedTopic.id) },
                     onPromote: { kind, title, detail in
                         onPromoteTopic(selectedTopic.id, kind, title, detail)
+                    },
+                    onResolve: { resolution in
+                        onResolveTopic(selectedTopic.id, resolution)
                     }
                 )
             } else {
@@ -220,9 +253,8 @@ private struct ProjectTopicList: View {
             Divider()
 
             HStack(spacing: 14) {
-                TopicCount(status: .captured, topics: topics)
-                TopicCount(status: .discussing, topics: topics)
-                TopicCount(status: .converted, topics: topics)
+                TopicDispositionCount(disposition: .futureDecision, topics: topics)
+                TopicDispositionCount(disposition: .awaitingVerification, topics: topics)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 20)
@@ -263,16 +295,23 @@ private struct ProjectTopicList: View {
     }
 }
 
-private struct TopicCount: View {
-    let status: ProjectTopicStatus
+private struct TopicDispositionCount: View {
+    let disposition: ProjectTopicDisposition
     let topics: [ProjectTopic]
+
+    private var count: Int {
+        topics.filter {
+            ($0.status == .captured || $0.status == .discussing)
+                && $0.effectiveDisposition == disposition
+        }.count
+    }
 
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(status.color)
+                .fill(disposition.color)
                 .frame(width: 5, height: 5)
-            Text("\(topics.filter { $0.status == status }.count) \(status.title)")
+            Text("\(count) \(disposition.title)")
         }
         .font(WorkstateTheme.captionFont.monospacedDigit())
         .foregroundStyle(WorkstateTheme.secondaryLabel)
@@ -297,9 +336,9 @@ private struct TopicRow: View {
                         Text(topic.title)
                             .font(WorkstateTheme.headlineFont)
                             .lineLimit(1)
-                        Text(topic.kind.title)
+                        Text(topic.effectiveDisposition.title)
                             .font(WorkstateTheme.microFont)
-                            .foregroundStyle(WorkstateTheme.secondaryLabel)
+                            .foregroundStyle(topic.effectiveDisposition.color)
                     }
 
                     Text(topic.summary)
@@ -309,8 +348,16 @@ private struct TopicRow: View {
                         .multilineTextAlignment(.leading)
 
                     HStack(spacing: 6) {
-                        Text(topic.status.title)
-                            .foregroundStyle(topic.status.color)
+                        Text(
+                            topic.status == .captured || topic.status == .discussing
+                                ? topic.kind.title
+                                : topic.status.title
+                        )
+                        .foregroundStyle(
+                            topic.status == .captured || topic.status == .discussing
+                                ? WorkstateTheme.secondaryLabel
+                                : topic.status.color
+                        )
                         Text("·")
                         Text("\(topic.sourceIDs.count) 个来源")
                         Text("·")
@@ -343,8 +390,10 @@ private struct ProjectTopicDetail: View {
     let accent: Color
     let onDiscuss: () -> Void
     let onPromote: (ProjectTopicPromotionKind, String, String) -> Void
+    let onResolve: (ProjectTopicResolution) -> Void
     @Environment(\.workstateSnapshotRendering) private var snapshotRendering
     @State private var isPromotionPresented = false
+    @State private var isCancelConfirmationPresented = false
 
     var body: some View {
         Group {
@@ -390,9 +439,26 @@ private struct ProjectTopicDetail: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                TopicDetailSection(title: "暂缓", systemImage: "pause.circle") {
-                    TopicKeyValue(label: "原因", value: topic.deferredReason)
-                    TopicKeyValue(label: "回来处理", value: topic.revisitTrigger)
+                TopicDetailSection(
+                    title: topic.effectiveDisposition == .awaitingVerification
+                        ? "等待确认"
+                        : "暂缓",
+                    systemImage: topic.effectiveDisposition == .awaitingVerification
+                        ? "hourglass"
+                        : "pause.circle"
+                ) {
+                    TopicKeyValue(
+                        label: topic.effectiveDisposition == .awaitingVerification
+                            ? "当前缺口"
+                            : "原因",
+                        value: topic.deferredReason
+                    )
+                    TopicKeyValue(
+                        label: topic.effectiveDisposition == .awaitingVerification
+                            ? "确认时机"
+                            : "回来处理",
+                        value: topic.revisitTrigger
+                    )
                 }
 
                 if !topic.openQuestions.isEmpty {
@@ -448,8 +514,11 @@ private struct ProjectTopicDetail: View {
     private var topicHeader: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 7) {
-                Label(topic.status.title, systemImage: topic.status.symbol)
-                    .foregroundStyle(topic.status.color)
+                Label(
+                    topic.effectiveDisposition.title,
+                    systemImage: topic.effectiveDisposition.symbol
+                )
+                .foregroundStyle(topic.effectiveDisposition.color)
                 Text("·")
                     .foregroundStyle(WorkstateTheme.tertiaryLabel)
                 Label(topic.kind.title, systemImage: topic.kind.symbol)
@@ -481,19 +550,62 @@ private struct ProjectTopicDetail: View {
                 .tint(accent)
 
                 if topic.status == .captured || topic.status == .discussing {
+                    if topic.effectiveDisposition == .awaitingVerification {
+                        Button {
+                            onResolve(.completed)
+                        } label: {
+                            Label("确认完成", systemImage: "checkmark.circle")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+                        .tint(WorkstateTheme.success)
+
+                        Button {
+                            onPromote(
+                                .task,
+                                topic.title,
+                                topic.proposedDirection.isEmpty
+                                    ? topic.currentUnderstanding
+                                    : topic.proposedDirection
+                            )
+                        } label: {
+                            Label("继续跟进", systemImage: "arrow.forward.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                    } else {
+                        Button {
+                            isPromotionPresented = true
+                        } label: {
+                            Label("确认推进", systemImage: "checkmark.seal")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                    }
+
                     Button {
-                        isPromotionPresented = true
+                        isCancelConfirmationPresented = true
                     } label: {
-                        Label("确认进入流程", systemImage: "checkmark.seal")
+                        Label("取消", systemImage: "xmark")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
+                    .tint(WorkstateTheme.danger)
                 }
             }
         }
         .padding(.horizontal, 20)
         .padding(.top, 76)
         .padding(.bottom, 18)
+        .confirmationDialog(
+            "取消这个议题？",
+            isPresented: $isCancelConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("取消议题", role: .destructive) {
+                onResolve(.cancelled)
+            }
+        }
     }
 }
 
@@ -638,6 +750,7 @@ struct TopicComposerSheet: View {
     @State private var title = ""
     @State private var summary = ""
     @State private var kind: ProjectTopicKind = .product
+    @State private var disposition: ProjectTopicDisposition = .futureDecision
     @State private var origin = ""
     @State private var direction = ""
     @State private var deferredReason = ""
@@ -666,6 +779,12 @@ struct TopicComposerSheet: View {
                         Label(kind.title, systemImage: kind.symbol).tag(kind)
                     }
                 }
+                Picker("处理状态", selection: $disposition) {
+                    ForEach(ProjectTopicDisposition.allCases) { disposition in
+                        Label(disposition.title, systemImage: disposition.symbol)
+                            .tag(disposition)
+                    }
+                }
                 TextField("一句话说明", text: $summary, axis: .vertical)
                     .lineLimit(2...4)
                 TextField("起源", text: $origin, axis: .vertical)
@@ -692,6 +811,7 @@ struct TopicComposerSheet: View {
             summary: summary.isEmpty ? "尚未补充说明。" : summary,
             status: .captured,
             kind: kind,
+            disposition: disposition,
             currentUnderstanding: originText.isEmpty ? "议题刚刚建立，等待进一步整理。" : originText,
             proposedDirection: direction.isEmpty ? "尚未形成明确方向。" : direction,
             deferredReason: deferredReason.isEmpty ? "当前项目主线优先。" : deferredReason,

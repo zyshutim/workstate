@@ -81,6 +81,7 @@ public struct ProjectTopicUpdateInput: Sendable {
     public var summary: String
     public var status: ProjectTopicStatus
     public var kind: ProjectTopicKind
+    public var disposition: ProjectTopicDisposition
     public var currentUnderstanding: String
     public var proposedDirection: String
     public var deferredReason: String
@@ -95,6 +96,7 @@ public struct ProjectTopicUpdateInput: Sendable {
         summary: String,
         status: ProjectTopicStatus,
         kind: ProjectTopicKind,
+        disposition: ProjectTopicDisposition = .futureDecision,
         currentUnderstanding: String,
         proposedDirection: String = "",
         deferredReason: String = "",
@@ -108,6 +110,7 @@ public struct ProjectTopicUpdateInput: Sendable {
         self.summary = summary
         self.status = status
         self.kind = kind
+        self.disposition = disposition
         self.currentUnderstanding = currentUnderstanding
         self.proposedDirection = proposedDirection
         self.deferredReason = deferredReason
@@ -137,6 +140,22 @@ public struct ProjectTopicPromotionInput: Sendable {
         self.kind = kind
         self.title = title
         self.detail = detail
+    }
+}
+
+public struct ProjectTopicResolutionInput: Sendable {
+    public var projectID: String
+    public var topicID: String
+    public var resolution: ProjectTopicResolution
+
+    public init(
+        projectID: String,
+        topicID: String,
+        resolution: ProjectTopicResolution
+    ) {
+        self.projectID = projectID
+        self.topicID = topicID
+        self.resolution = resolution
     }
 }
 
@@ -378,6 +397,47 @@ public struct WorkstateService: Sendable {
             )
         }
         throw WorkstateStorageError.missingTask(taskID)
+    }
+
+    public func contextSnapshot(
+        projectID: String,
+        generatedAt: Date = Date(),
+        collaborationGuidance: [String] = []
+    ) throws -> ContextSnapshot {
+        try ContextSnapshotBuilder().project(
+            projectID,
+            from: repository.load(),
+            generatedAt: generatedAt,
+            collaborationGuidance: collaborationGuidance
+        )
+    }
+
+    public func contextSnapshot(
+        taskID: String,
+        generatedAt: Date = Date(),
+        collaborationGuidance: [String] = []
+    ) throws -> ContextSnapshot {
+        try ContextSnapshotBuilder().task(
+            taskID,
+            from: repository.load(),
+            generatedAt: generatedAt,
+            collaborationGuidance: collaborationGuidance
+        )
+    }
+
+    public func contextSnapshot(
+        threadID: String,
+        projectID: String,
+        generatedAt: Date = Date(),
+        collaborationGuidance: [String] = []
+    ) throws -> ContextSnapshot {
+        try ContextSnapshotBuilder().thread(
+            threadID,
+            projectID: projectID,
+            from: repository.load(),
+            generatedAt: generatedAt,
+            collaborationGuidance: collaborationGuidance
+        )
     }
 
     @discardableResult
@@ -626,6 +686,8 @@ public struct WorkstateService: Sendable {
                 topic.summary = input.summary
                 topic.status = input.status
                 topic.kind = input.kind
+                topic.disposition = input.disposition
+                topic.resolution = nil
                 topic.currentUnderstanding = input.currentUnderstanding
                 topic.proposedDirection = input.proposedDirection
                 topic.deferredReason = input.deferredReason
@@ -645,6 +707,7 @@ public struct WorkstateService: Sendable {
                         summary: input.summary,
                         status: input.status,
                         kind: input.kind,
+                        disposition: input.disposition,
                         currentUnderstanding: input.currentUnderstanding,
                         proposedDirection: input.proposedDirection,
                         deferredReason: input.deferredReason,
@@ -753,6 +816,46 @@ public struct WorkstateService: Sendable {
                 snapshot.projects[projectIndex].events.append(event)
                 topic.derivedTaskIDs.append(taskID)
             }
+            snapshot.projects[projectIndex].topics[topicIndex] = topic
+            touchProject(at: projectIndex, timestamp: mutation.timestamp, in: &snapshot)
+        }
+    }
+
+    @discardableResult
+    public func resolveTopic(_ input: ProjectTopicResolutionInput) throws -> WorkspaceSnapshot {
+        let mutation = WorkspaceMutation(
+            kind: "topic.resolve",
+            summary: input.topicID,
+            projectID: input.projectID
+        )
+        return try repository.update(mutation: mutation) { snapshot in
+            let projectIndex = try projectIndex(input.projectID, in: snapshot)
+            guard let topicIndex = snapshot.projects[projectIndex].topics.firstIndex(where: {
+                $0.id == input.topicID
+            }) else {
+                throw WorkstateStorageError.invalidState("Topic not found: \(input.topicID)")
+            }
+            guard snapshot.projects[projectIndex].topics[topicIndex].status == .captured
+                    || snapshot.projects[projectIndex].topics[topicIndex].status == .discussing else {
+                throw WorkstateStorageError.invalidState("Only open topics can be resolved")
+            }
+
+            var topic = snapshot.projects[projectIndex].topics[topicIndex]
+            topic.status = .closed
+            topic.resolution = input.resolution
+            topic.confirmedAt = mutation.timestamp
+            topic.updatedAt = mutation.timestamp
+            topic.notes.append(
+                ProjectTopicNote(
+                    timestamp: mutation.timestamp,
+                    kind: .confirmation,
+                    title: input.resolution == .completed ? "确认完成" : "取消议题",
+                    detail: input.resolution == .completed
+                        ? "用户确认相关结果已经完成。"
+                        : "用户确认不再继续处理该议题。",
+                    sourceIDs: topic.sourceIDs
+                )
+            )
             snapshot.projects[projectIndex].topics[topicIndex] = topic
             touchProject(at: projectIndex, timestamp: mutation.timestamp, in: &snapshot)
         }
@@ -937,8 +1040,17 @@ public struct WorkstateService: Sendable {
     }
 
     @discardableResult
-    public func updateTask(id: String, update: TaskUpdate) throws -> WorkspaceSnapshot {
-        let mutation = WorkspaceMutation(kind: "task.update", summary: id, taskID: id)
+    public func updateTask(
+        id: String,
+        update: TaskUpdate,
+        timestamp: Date? = nil
+    ) throws -> WorkspaceSnapshot {
+        let mutation = WorkspaceMutation(
+            timestamp: timestamp ?? Date(),
+            kind: "task.update",
+            summary: id,
+            taskID: id
+        )
         return try repository.update(mutation: mutation) { snapshot in
             let location = try taskLocation(id, in: snapshot)
             if let status = update.status { snapshot.projects[location.project].tasks[location.task].status = status }
@@ -948,6 +1060,9 @@ public struct WorkstateService: Sendable {
             snapshot.projects[location.project].tasks[location.task].updatedAt = mutation.timestamp
             if update.status == .completed || update.status == .abandoned {
                 snapshot.projects[location.project].tasks[location.task].completedAt = mutation.timestamp
+                if snapshot.projects[location.project].focusedTaskID == id {
+                    snapshot.projects[location.project].focusedTaskID = nil
+                }
             }
             touchProject(at: location.project, timestamp: mutation.timestamp, in: &snapshot)
         }
@@ -1089,10 +1204,10 @@ public struct WorkstateService: Sendable {
             if let taskID = input.taskID,
                let taskIndex = snapshot.projects[projectIndex].tasks.firstIndex(where: { $0.id == taskID }) {
                 snapshot.projects[projectIndex].tasks[taskIndex].currentStage = input.stage
-                snapshot.projects[projectIndex].tasks[taskIndex].updatedAt = mutation.timestamp
+                snapshot.projects[projectIndex].tasks[taskIndex].updatedAt = event.timestamp
                 if input.kind == .completed {
                     snapshot.projects[projectIndex].tasks[taskIndex].status = .completed
-                    snapshot.projects[projectIndex].tasks[taskIndex].completedAt = mutation.timestamp
+                    snapshot.projects[projectIndex].tasks[taskIndex].completedAt = event.timestamp
                 } else if input.kind == .interruption {
                     snapshot.projects[projectIndex].tasks[taskIndex].status = .waiting
                 } else if input.kind == .resumed {
@@ -1103,10 +1218,38 @@ public struct WorkstateService: Sendable {
                let taskIndex = snapshot.projects[projectIndex].tasks.firstIndex(where: { $0.id == mergeTaskID }) {
                 snapshot.projects[projectIndex].tasks[taskIndex].status = .completed
                 snapshot.projects[projectIndex].tasks[taskIndex].currentStage = .completed
-                snapshot.projects[projectIndex].tasks[taskIndex].completedAt = mutation.timestamp
+                snapshot.projects[projectIndex].tasks[taskIndex].completedAt = event.timestamp
                 snapshot.projects[projectIndex].tasks[taskIndex].mergedByEventID = eventID
+                if snapshot.projects[projectIndex].focusedTaskID == mergeTaskID {
+                    snapshot.projects[projectIndex].focusedTaskID = nil
+                }
             }
-            touchProject(at: projectIndex, timestamp: mutation.timestamp, in: &snapshot)
+            touchProject(at: projectIndex, timestamp: event.timestamp, in: &snapshot)
+        }
+    }
+
+    @discardableResult
+    public func focusTask(
+        projectID: String,
+        taskID: String?
+    ) throws -> WorkspaceSnapshot {
+        let mutation = WorkspaceMutation(
+            kind: "task.focus",
+            summary: taskID.map { "Focused \($0)" } ?? "Cleared project focus",
+            projectID: projectID,
+            taskID: taskID
+        )
+        return try repository.update(mutation: mutation) { snapshot in
+            let projectIndex = try projectIndex(projectID, in: snapshot)
+            if let taskID {
+                guard let task = snapshot.projects[projectIndex].task(id: taskID) else {
+                    throw WorkstateStorageError.missingTask(taskID)
+                }
+                guard task.status == .active else {
+                    throw WorkstateStorageError.invalidState("Cannot focus an inactive workline: \(taskID)")
+                }
+            }
+            snapshot.projects[projectIndex].focusedTaskID = taskID
         }
     }
 

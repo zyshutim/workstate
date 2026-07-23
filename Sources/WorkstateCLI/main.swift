@@ -58,6 +58,44 @@ struct WorkstateCLI {
         case "task":
             let id = try arguments.requiredPositional(at: 0, name: "task-id")
             try printJSON(service.taskContext(taskID: id))
+        case "handoff":
+            let scope = try arguments.requiredPositional(at: 0, name: "project|task|thread")
+            let id = try arguments.requiredPositional(at: 1, name: "\(scope)-id")
+            let snapshot: ContextSnapshot
+            let guidance = (try? CollaborationProfileRepository(
+                root: repository.paths.root
+            ).load().activeGuidance) ?? []
+            switch scope {
+            case "project":
+                snapshot = try service.contextSnapshot(
+                    projectID: id,
+                    collaborationGuidance: guidance
+                )
+            case "task":
+                snapshot = try service.contextSnapshot(
+                    taskID: id,
+                    collaborationGuidance: guidance
+                )
+            case "thread":
+                guard let binding = try CodexSessionScanner().routeBinding(threadID: id) else {
+                    throw CLIError.invalidOption("Thread has no Workstate project route: \(id)")
+                }
+                snapshot = try service.contextSnapshot(
+                    threadID: id,
+                    projectID: binding.projectID,
+                    collaborationGuidance: guidance
+                )
+            default:
+                throw CLIError.invalidOption("Handoff scope must be project, task, or thread")
+            }
+            switch arguments.value("format") ?? "markdown" {
+            case "markdown":
+                print(ContextSnapshotMarkdownRenderer().render(snapshot), terminator: "")
+            case "json":
+                try printJSON(snapshot)
+            default:
+                throw CLIError.invalidOption("--format must be markdown or json")
+            }
         case "source":
             let excerpt = arguments.values("user").map {
                 ConversationMessage(role: "user", text: $0)
@@ -206,6 +244,14 @@ struct WorkstateCLI {
                 )
             )
             try printJSON(service.taskContext(taskID: id))
+        case "task-focus":
+            let projectID = try arguments.required("project")
+            let taskID = try arguments.requiredPositional(at: 0, name: "task-id")
+            _ = try service.focusTask(
+                projectID: projectID,
+                taskID: taskID == "none" ? nil : taskID
+            )
+            try printJSON(service.compactProject(projectID: projectID))
         case "event":
             let kind = try parseEnum(
                 try arguments.required("kind"),
@@ -289,6 +335,116 @@ struct WorkstateCLI {
                 throw CLIError.invalidOption("No activity brief is available to compose")
             }
             try printJSON(brief)
+        case "monitoring-repair":
+            let settings = try WorkstateSettingsRepository().load(
+                workspaceHasProjects: !service.snapshot().projects.isEmpty
+            )
+            guard settings.setupCompleted,
+                  settings.liveMonitoringEnabled,
+                  let cutoff = settings.liveMonitoringStartedAt else {
+                throw CLIError.invalidOption("Live monitoring has no active start time")
+            }
+            let scanner = CodexSessionScanner()
+            let discarded = try scanner.discardUnprocessed(before: cutoff)
+            try printJSON(MonitoringRepairOutput(cutoff: cutoff, discarded: discarded))
+        case "monitoring-retry-failed":
+            let scanner = CodexSessionScanner()
+            let state = try scanner.loadState()
+            let ids = (state.processingRecords ?? [:]).compactMap { id, record -> String? in
+                record.stage == .failed ? id : nil
+            }
+            try scanner.requeue(segmentIDs: ids)
+            try printJSON(MonitoringRetryOutput(requeued: ids.count))
+        case "collaboration-profile-import":
+            let path = try arguments.requiredPositional(at: 0, name: "profile-json")
+            let profile = try WorkstateCoding.makeDecoder().decode(
+                CollaborationProfile.self,
+                from: Data(contentsOf: URL(fileURLWithPath: path))
+            )
+            try CollaborationProfileRepository(root: repository.paths.root).save(profile)
+            try printJSON(profile)
+        case "agent-smoke":
+            let runtime = AgentRuntimeClient(runtimeRoot: repository.paths.root)
+            let syntheticWorkspace = WorkspaceSnapshot(
+                projects: [
+                    ProjectRecord(
+                        id: "synthetic-workstate",
+                        name: "Synthetic Workstate",
+                        summary: "Protocol-only smoke-test fixture",
+                        context: ProjectContext(
+                            currentSummary: "Protocol-only smoke-test fixture",
+                            purpose: "Verify structured Agent Runtime calls without real project data"
+                        )
+                    )
+                ]
+            )
+            let route = try runtime.routeGlobalChat(
+                message: "Route this protocol smoke test to Synthetic Workstate.",
+                recentMessages: [],
+                workspace: syntheticWorkspace
+            )
+            let collaboration = try runtime.collaborationSteward(
+                profile: CollaborationProfile(),
+                history: [],
+                message: "这是结构化调用自检。请简短回复，不要产生档案 mutation。"
+            )
+            try printJSON(
+                AgentSmokeOutput(
+                    routedProjectID: route.projectID,
+                    collaborationReply: collaboration.reply,
+                    collaborationMutationCount: collaboration.mutations.count
+                )
+            )
+        case "agent-workline-smoke":
+            let runtime = AgentRuntimeClient(runtimeRoot: repository.paths.root)
+            let project = ProjectRecord(
+                id: "synthetic-workstate",
+                name: "Synthetic Workstate",
+                summary: "Protocol-only workline fixture",
+                context: ProjectContext(
+                    currentSummary: "Protocol-only workline fixture",
+                    purpose: "Verify ordered batch lifecycle decisions"
+                )
+            )
+            let timestamp = Date()
+            let segments = [
+                SessionSegment(
+                    threadID: "synthetic-thread",
+                    turnID: "synthetic-turn-1",
+                    sourcePath: "/tmp/synthetic-session.jsonl",
+                    startOffset: 0,
+                    endOffset: 1,
+                    cwd: "/tmp",
+                    userText: "开始一个独立的文案整理任务。",
+                    assistantText: "已开始整理。",
+                    timestamp: timestamp
+                ),
+                SessionSegment(
+                    threadID: "synthetic-thread",
+                    turnID: "synthetic-turn-2",
+                    sourcePath: "/tmp/synthetic-session.jsonl",
+                    startOffset: 1,
+                    endOffset: 2,
+                    cwd: "/tmp",
+                    userText: "已经整理完成并检查通过。",
+                    assistantText: "任务已完成并通过检查。",
+                    timestamp: timestamp.addingTimeInterval(1)
+                )
+            ]
+            let decisions = try runtime.stewardBatch(
+                segments: segments,
+                project: project,
+                scanner: CodexSessionScanner(runtimeRoot: repository.paths.root)
+            )
+            try printJSON(
+                AgentWorklineSmokeOutput(
+                    decisionCount: decisions.count,
+                    actions: decisions.map(\.result.worklineAction),
+                    closureDispositions: decisions.map {
+                        $0.result.closureDisposition ?? ""
+                    }
+                )
+            )
         case "workline-reconcile":
             let path = try arguments.requiredPositional(at: 0, name: "reconciliation-json")
             let input = try WorkstateCoding.makeDecoder().decode(
@@ -331,11 +487,16 @@ struct WorkstateCLI {
               workstate graph
               workstate project <project-id> [--recent N]
               workstate task <task-id>
+              workstate handoff project <project-id> [--format markdown|json]
+              workstate handoff task <task-id> [--format markdown|json]
+              workstate handoff thread <thread-id> [--format markdown|json]
               workstate snapshot
               workstate home
 
             Write:
               workstate brief-compose [--force]
+              workstate monitoring-repair
+              workstate collaboration-profile-import <profile-json>
               workstate workline-reconcile <reconciliation-json>
               workstate source --id ID --kind KIND --label TEXT --locator PATH [--thread ID] [--turn ID] [--user TEXT] [--assistant TEXT] [--hash VALUE]
               workstate project-create --id ID --name TEXT --summary TEXT --x N --y N [--purpose TEXT] [--status active] [--accent blue]
@@ -344,11 +505,33 @@ struct WorkstateCLI {
               workstate relation --id ID --from PROJECT --to PROJECT --kind KIND --label TEXT [--status confirmed] [--source ID]
               workstate task-start --project ID --id ID --title TEXT --objective TEXT --branch-from EVENT [--stage intake] [--tag TEXT] [--source ID]
               workstate task-update <id> [--status STATUS] [--stage STAGE] [--title TEXT] [--objective TEXT]
+              workstate task-focus <id|none> --project ID
               workstate event --project ID --title TEXT --summary TEXT --kind KIND --stage STAGE [--task ID] [--merge-task ID] [--parent EVENT] [--fact TEXT] [--decision TEXT] [--delivery STAGE]
               workstate context-revise --project ID --title TEXT --summary TEXT --status observed|inferred|confirmed [--change TEXT] [--current TEXT] [--statement TEXT] [--source ID]
             """
         )
     }
+}
+
+private struct MonitoringRepairOutput: Codable {
+    var cutoff: Date
+    var discarded: Int
+}
+
+private struct MonitoringRetryOutput: Codable {
+    var requeued: Int
+}
+
+private struct AgentSmokeOutput: Codable {
+    var routedProjectID: String
+    var collaborationReply: String
+    var collaborationMutationCount: Int
+}
+
+private struct AgentWorklineSmokeOutput: Codable {
+    var decisionCount: Int
+    var actions: [String]
+    var closureDispositions: [String]
 }
 
 private struct GraphOutput: Codable {

@@ -11,19 +11,24 @@ struct WorkstateChecks {
         try bootstrapGraphIntegrity()
         try newWorkspaceStartsEmpty()
         try settingsRoundTrip()
+        try collaborationRepositoriesRoundTrip()
+        try collaborationInferenceCannotRewriteActiveProfile()
         try modelCatalogFiltersUnsupportedOptions()
         try legacyStateMigration()
         try schemaV3Migration()
         try projectPositionUpdate()
         try projectModelReplacement()
+        try contextSnapshotSelectsCurrentWork()
         try daemonStatusWritesOnlyOnChange()
         try dailyBriefProjectsVerifiedDailyState()
         try topicRequiresExplicitPromotion()
+        try topicResolutionPreservesDisposition()
         try taskBranchAndMerge()
         try worklineReconciliationRepairsSemanticOwnership()
         try contextRevisionAuthority()
         try projectTimelineHierarchy()
         try projectTimelineParallelProjection()
+        try projectTimelineSequentialWorkStaysOnMainline()
         try projectBranchTreeProjection()
         try timelineSelectionHierarchy()
         try reviewResolutionAuthority()
@@ -33,6 +38,7 @@ struct WorkstateChecks {
         try sessionScannerPreservesIncompleteLine()
         try sessionCatalogAndHistoryRangeImport()
         try monitoringCutoffDropsDisabledPeriod()
+        try interruptedProcessingRecoversWithoutRepeatingCompletedStages()
         try segmentProcessingIsIdempotent()
         try sessionWatcherReceivesFileChanges()
         try scannerMemoryRemainsBounded()
@@ -59,6 +65,7 @@ struct WorkstateChecks {
         let repository = WorkstateSettingsRepository(root: root)
         let initial = try repository.load(workspaceHasProjects: true)
         try require(initial.setupCompleted, "existing project workspace skips onboarding")
+        try require(initial.liveMonitoringStartedAt != nil, "existing workspace starts monitoring from now")
         try require(initial.profile(for: .route).modelID == "gpt-5.6-luna", "router default model")
 
         var updated = initial
@@ -68,6 +75,20 @@ struct WorkstateChecks {
         let loaded = try repository.load()
         try require(!loaded.liveMonitoringEnabled, "monitoring setting persists")
         try require(loaded.profile(for: .brief).effort == .high, "agent effort persists")
+
+        var legacy = initial
+        legacy.liveMonitoringStartedAt = nil
+        try repository.save(legacy)
+        let fileDate = Date(timeIntervalSince1970: 1_784_619_029)
+        try FileManager.default.setAttributes(
+            [.modificationDate: fileDate],
+            ofItemAtPath: repository.url.path
+        )
+        let migrated = try repository.load()
+        try require(
+            migrated.liveMonitoringStartedAt == fileDate,
+            "legacy monitoring start migrates from the last explicit settings save"
+        )
     }
 
     private static func modelCatalogFiltersUnsupportedOptions() throws {
@@ -117,6 +138,83 @@ struct WorkstateChecks {
         try require(
             models[0].supportedEfforts == [.low, .medium],
             "catalog excludes max, ultra, and unsupported effort options"
+        )
+    }
+
+    private static func collaborationRepositoriesRoundTrip() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-collaboration-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let profileRepository = CollaborationProfileRepository(root: root)
+        let entry = CollaborationProfileEntry(
+            id: "direct-language",
+            kind: .preference,
+            status: .active,
+            title: "直接表达",
+            detail: "使用简洁、具体的中文"
+        )
+        let profile = CollaborationProfile(entries: [entry])
+        try profileRepository.save(profile)
+        let loadedProfile = try profileRepository.load()
+        try require(
+            loadedProfile.entries.map(\.id) == [entry.id]
+                && loadedProfile.entries.first?.detail == entry.detail,
+            "collaboration profile round trips"
+        )
+
+        let conversationRepository = GlobalConversationRepository(root: root)
+        let conversation = GlobalConversation(
+            messages: [
+                GlobalChatMessage(
+                    id: "message",
+                    role: .user,
+                    text: "记录这个议题",
+                    projectID: "project",
+                    projectName: "Project"
+                )
+            ]
+        )
+        try conversationRepository.save(conversation)
+        let loadedConversation = try conversationRepository.load()
+        try require(
+            loadedConversation.messages.map(\.id) == conversation.messages.map(\.id)
+                && loadedConversation.messages.first?.text == conversation.messages.first?.text,
+            "global conversation preserves original text and route"
+        )
+    }
+
+    private static func collaborationInferenceCannotRewriteActiveProfile() throws {
+        let applier = CollaborationProfileApplier()
+        let invalid = CollaborationProfileMutation(
+            action: "create",
+            authority: "inference",
+            id: "invalid-active-inference",
+            kind: "rule",
+            status: "active",
+            title: "Invalid",
+            detail: "An inference cannot become active"
+        )
+        do {
+            _ = try applier.apply([invalid], to: CollaborationProfile())
+            throw CheckFailure.failed("inferred active collaboration rule is rejected")
+        } catch let error as WorkstateStorageError {
+            guard error.localizedDescription.contains("candidate") else { throw error }
+        }
+
+        let candidate = CollaborationProfileMutation(
+            action: "create",
+            authority: "inference",
+            id: "candidate",
+            kind: "preference",
+            status: "candidate",
+            title: "Candidate",
+            detail: "Needs user confirmation"
+        )
+        let applied = try applier.apply([candidate], to: CollaborationProfile())
+        try require(
+            applied.entries.first?.status == .candidate,
+            "inferred collaboration pattern remains a candidate"
         )
     }
 
@@ -487,6 +585,66 @@ struct WorkstateChecks {
             try require(promoted?.topic(id: topicID)?.status == .converted, "confirmed topic enters formal flow")
             try require(promoted?.context.acceptedDecisions.last?.text == "粗剪时间线进入多轨方向", "promotion creates decision")
             try require(promoted?.events.contains(where: { $0.title == "粗剪支持多轨" && $0.kind == .decision }) == true, "promotion creates timeline event")
+        }
+    }
+
+    private static func topicResolutionPreservesDisposition() throws {
+        try withFixture { repository in
+            try repository.ensureInitialized(initial: WorkstateBootstrap.makeInitialState())
+            let service = WorkstateService(repository: repository)
+            let projectID = "reframe-multicam"
+
+            _ = try service.upsertTopic(
+                projectID: projectID,
+                input: ProjectTopicUpdateInput(
+                    id: "await-result",
+                    title: "等待运行结果",
+                    summary: "实现已经结束，但结果未知",
+                    status: .captured,
+                    kind: .backend,
+                    disposition: .awaitingVerification,
+                    currentUnderstanding: "需要等待真实运行结果"
+                )
+            )
+            let captured = try service.snapshot().project(id: projectID)?.topic(id: "await-result")
+            try require(
+                captured?.disposition == .awaitingVerification,
+                "topic keeps awaiting-verification disposition"
+            )
+
+            _ = try service.resolveTopic(
+                ProjectTopicResolutionInput(
+                    projectID: projectID,
+                    topicID: "await-result",
+                    resolution: .completed
+                )
+            )
+            let completed = try service.snapshot().project(id: projectID)?.topic(id: "await-result")
+            try require(completed?.status == .closed, "verified topic closes")
+            try require(completed?.resolution == .completed, "verified topic records completion")
+
+            _ = try service.upsertTopic(
+                projectID: projectID,
+                input: ProjectTopicUpdateInput(
+                    id: "future-choice",
+                    title: "未来方向",
+                    summary: "尚未决定是否继续",
+                    status: .captured,
+                    kind: .product,
+                    disposition: .futureDecision,
+                    currentUnderstanding: "等待产品决策"
+                )
+            )
+            _ = try service.resolveTopic(
+                ProjectTopicResolutionInput(
+                    projectID: projectID,
+                    topicID: "future-choice",
+                    resolution: .cancelled
+                )
+            )
+            let cancelled = try service.snapshot().project(id: projectID)?.topic(id: "future-choice")
+            try require(cancelled?.status == .closed, "cancelled topic closes")
+            try require(cancelled?.resolution == .cancelled, "topic records cancellation")
         }
     }
 
@@ -905,6 +1063,48 @@ struct WorkstateChecks {
         let evidence = try Data(contentsOf: scanner.evidenceURL)
         let evidenceText = String(data: evidence, encoding: .utf8) ?? ""
         try require(!evidenceText.contains("Disabled period"), "disabled-period content never enters evidence")
+
+        let historicalTurnID = "019eb0cf-abbf-7913-84c5-c88f18d3c83f"
+        let replay = """
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"task_started","turn_id":"\(historicalTurnID)"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"user_message","message":"Replayed historical turn"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"task_complete","turn_id":"\(historicalTurnID)","last_agent_message":"Old result"}}
+
+        """
+        let replayHandle = try FileHandle(forWritingTo: session)
+        try replayHandle.seekToEnd()
+        try replayHandle.write(contentsOf: Data(replay.utf8))
+        try replayHandle.close()
+        let replayResult = try scanner.scanChangedFiles([session.path], minimumTimestamp: now)
+        try require(
+            !replayResult.contains(where: { $0.turnID == historicalTurnID }),
+            "turn id timestamp rejects replayed historical turns"
+        )
+
+        let queuedHistoricalTurnID = "019eb0d2-5a75-78d0-bb01-065e91fe9360"
+        let queuedReplay = """
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"task_started","turn_id":"\(queuedHistoricalTurnID)"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"user_message","message":"Queued historical turn"}}
+        {"type":"event_msg","timestamp":"\(afterCutoff.formatted(iso))","payload":{"type":"task_complete","turn_id":"\(queuedHistoricalTurnID)","last_agent_message":"Old queued result"}}
+
+        """
+        let queuedHandle = try FileHandle(forWritingTo: session)
+        try queuedHandle.seekToEnd()
+        try queuedHandle.write(contentsOf: Data(queuedReplay.utf8))
+        try queuedHandle.close()
+        _ = try scanner.scanChangedFiles([session.path])
+        let pendingAfterReplay = try scanner.pendingSegments()
+        try require(
+            pendingAfterReplay.contains(where: { $0.turnID == queuedHistoricalTurnID }),
+            "historical replay is queued without a monitoring cutoff"
+        )
+        let discarded = try scanner.discardUnprocessed(before: now)
+        try require(discarded == 1, "disabled-period recovery discards queued historical turns")
+        let repairedEvidence = try String(contentsOf: scanner.evidenceURL, encoding: .utf8)
+        try require(
+            !repairedEvidence.contains("Replayed historical turn"),
+            "disabled-period recovery removes historical evidence"
+        )
     }
 
     private static func segmentProcessingIsIdempotent() throws {
@@ -979,6 +1179,80 @@ struct WorkstateChecks {
             let completedRecord = try scanner.processingRecord(segmentID: segment.id)
             try require(completedRecord.stage == .completed, "completed stage persists")
         }
+    }
+
+    private static func interruptedProcessingRecoversWithoutRepeatingCompletedStages() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-processing-recovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("sessions"),
+            runtimeRoot: root
+        )
+        try scanner.replacePending(segmentIDs: ["routing", "stewarding", "applying"])
+
+        try scanner.beginProcessing(segmentID: "routing", stage: .routing)
+
+        try scanner.recordRouteResult(
+            segmentID: "stewarding",
+            route: RouteResult(
+                action: "switch_project",
+                projectId: "project",
+                projectName: "Project",
+                projectSummary: "Summary",
+                confidence: 1,
+                reason: "Matched"
+            )
+        )
+        try scanner.beginProcessing(segmentID: "stewarding", stage: .stewarding)
+
+        let route = RouteResult(
+            action: "switch_project",
+            projectId: "project",
+            projectName: "Project",
+            projectSummary: "Summary",
+            confidence: 1,
+            reason: "Matched"
+        )
+        try scanner.recordRouteResult(segmentID: "applying", route: route)
+        try scanner.recordStewardResult(
+            segmentID: "applying",
+            steward: StewardResult(
+                classification: "no_change",
+                title: "",
+                summary: "",
+                worklineAction: "none",
+                worklineId: "",
+                worklineTitle: "",
+                worklineObjective: "",
+                branchFromWorklineId: "",
+                kind: "contextUpdate",
+                stage: "intake",
+                delivery: "unchanged",
+                facts: [],
+                openIssues: []
+            )
+        )
+        try scanner.beginProcessing(segmentID: "applying", stage: .applying)
+
+        let recovered = try scanner.recoverInterruptedProcessing()
+        try require(recovered == 3, "all interrupted processing stages recover")
+        let routingRecord = try scanner.processingRecord(segmentID: "routing")
+        let stewardingRecord = try scanner.processingRecord(segmentID: "stewarding")
+        let applyingRecord = try scanner.processingRecord(segmentID: "applying")
+        try require(
+            routingRecord.stage == .queued,
+            "routing restarts before its missing model result"
+        )
+        try require(
+            stewardingRecord.stage == .routed,
+            "stewarding preserves the completed route"
+        )
+        try require(
+            applyingRecord.stage == .stewarded,
+            "applying preserves route and steward results"
+        )
     }
 
     private static func sessionWatcherReceivesFileChanges() throws {
@@ -1378,6 +1652,98 @@ struct WorkstateChecks {
         }
     }
 
+    private static func contextSnapshotSelectsCurrentWork() throws {
+        try withFixture { repository in
+            let source = SourceReference(
+                id: "source",
+                kind: "codex",
+                label: "Current discussion",
+                locator: "/tmp/session.jsonl",
+                threadID: "thread",
+                turnIDs: ["turn"]
+            )
+            let activeTask = TaskRecord(
+                id: "active",
+                title: "Active work",
+                objective: "Continue here",
+                status: .active,
+                currentStage: .implementation,
+                branchedFromEventID: "start",
+                sourceIDs: [source.id]
+            )
+            let completedTask = TaskRecord(
+                id: "done",
+                title: "Old work",
+                objective: "Already done",
+                status: .completed,
+                currentStage: .completed,
+                branchedFromEventID: "start"
+            )
+            let project = ProjectRecord(
+                id: "project",
+                name: "Project",
+                summary: "Fallback",
+                context: ProjectContext(
+                    currentSummary: "Current project HEAD",
+                    purpose: "Preserve context",
+                    understanding: [
+                        ContextStatement(text: "Confirmed understanding", status: .confirmed)
+                    ],
+                    acceptedDecisions: [
+                        DecisionRecord(text: "Confirmed decision", status: .confirmed)
+                    ],
+                    forbiddenDirections: ["Do not replay old history"]
+                ),
+                tasks: [activeTask, completedTask],
+                events: [
+                    ProjectEvent(
+                        id: "start",
+                        timestamp: Date(timeIntervalSince1970: 100),
+                        title: "Started",
+                        summary: "Start",
+                        kind: .taskStarted,
+                        loopStage: .intake
+                    ),
+                    ProjectEvent(
+                        id: "active-latest",
+                        taskID: activeTask.id,
+                        timestamp: Date(timeIntervalSince1970: 200),
+                        title: "Implementation",
+                        summary: "Current change",
+                        kind: .implementation,
+                        loopStage: .implementation,
+                        facts: ["The implementation changed"],
+                        sourceIDs: [source.id]
+                    )
+                ],
+                sourceIDs: [source.id]
+            )
+            try repository.ensureInitialized(
+                initial: WorkspaceSnapshot(projects: [project], sources: [source])
+            )
+            let snapshot = try WorkstateService(repository: repository).contextSnapshot(
+                projectID: project.id,
+                generatedAt: Date(timeIntervalSince1970: 300)
+            )
+            try require(snapshot.project.summary == "Current project HEAD", "handoff uses project HEAD")
+            try require(snapshot.worklines.map(\.id) == [activeTask.id], "handoff excludes completed work")
+            try require(snapshot.worklines[0].deltas.map(\.id) == ["active-latest"], "handoff keeps meaningful delta")
+            try require(snapshot.sources.map(\.id) == [source.id], "handoff keeps source pointer")
+            let markdown = ContextSnapshotMarkdownRenderer().render(snapshot)
+            try require(markdown.contains("Confirmed decision"), "handoff renders decisions")
+            try require(!markdown.contains("Old work"), "handoff omits completed work")
+            let handoff = try ContextHandoffExporter(root: repository.paths.root).export(snapshot)
+            try require(
+                FileManager.default.fileExists(atPath: handoff.url.path),
+                "handoff writes a durable project file"
+            )
+            try require(
+                handoff.prompt.contains(handoff.url.path),
+                "handoff prompt points another IDE to the durable file"
+            )
+        }
+    }
+
     private static func contextRevisionAuthority() throws {
         try withFixture { repository in
             try repository.ensureInitialized(initial: WorkstateBootstrap.makeInitialState())
@@ -1758,6 +2124,54 @@ struct WorkstateChecks {
         }
         try require(branch.points.count >= 2, "branch contains its lifecycle path")
         try require(branch.points.first!.y > branch.points.last!.y, "branch starts at the parent and advances independently")
+    }
+
+    private static func projectTimelineSequentialWorkStaysOnMainline() throws {
+        let firstTask = timelineTask(id: "first", start: 1, update: 2, completion: 2)
+        let secondTask = timelineTask(id: "second", start: 3, update: 4, completion: nil)
+        let start = ProjectEvent(
+            id: "project-start",
+            timestamp: timelineDate(0),
+            title: "Start",
+            summary: "Start",
+            kind: .projectStarted,
+            loopStage: .intake
+        )
+        let first = ProjectEvent(
+            id: "first-event",
+            taskID: firstTask.id,
+            timestamp: timelineDate(2),
+            title: "First complete",
+            summary: "First scope closed",
+            kind: .completed,
+            loopStage: .completed
+        )
+        let second = ProjectEvent(
+            id: "second-event",
+            taskID: secondTask.id,
+            timestamp: timelineDate(4),
+            title: "Second active",
+            summary: "Second scope is current",
+            kind: .implementation,
+            loopStage: .implementation
+        )
+        let project = ProjectRecord(
+            id: "project",
+            name: "Project",
+            summary: "Summary",
+            lastActivityAt: timelineDate(4),
+            focusedTaskID: secondTask.id,
+            tasks: [firstTask, secondTask],
+            events: [start, first, second]
+        )
+
+        let layout = ProjectTimelineLayout(project: project)
+        try require(layout.primaryTaskID == secondTask.id, "explicit focus selects current mainline")
+        try require(layout.branches.isEmpty, "sequential work does not create a branch")
+        try require(
+            layout.nodes.filter { $0.event.taskID != nil }.allSatisfy { $0.isOnMainline },
+            "sequential task events remain on mainline"
+        )
     }
 
     @MainActor

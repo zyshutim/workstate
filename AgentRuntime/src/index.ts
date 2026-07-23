@@ -19,6 +19,7 @@ type ProjectSummary = {
   summary: string;
   purpose: string;
   status: string;
+  focusedWorklineId: string;
   activeWorklines: Array<{
     id: string;
     title: string;
@@ -45,13 +46,24 @@ type RuntimeRequest = {
     }
   | {
       mode: "batch_route";
-      segments: Segment[];
+      segments: Array<Pick<Segment, "id" | "threadID" | "turnID" | "cwd" | "userText" | "timestamp">>;
       projects: ProjectSummary[];
       routeHints: Array<{ threadID: string; projectID: string }>;
     }
   | {
       mode: "steward";
       segment: Segment;
+      project: ProjectSummary & {
+        currentUnderstanding: string[];
+        acceptedDecisions: string[];
+        forbiddenDirections: string[];
+        openIssues: string[];
+        recentDeltas: Array<{ title: string; summary: string; kind: string; timestamp: string }>;
+      };
+    }
+  | {
+      mode: "batch_steward";
+      segments: Segment[];
       project: ProjectSummary & {
         currentUnderstanding: string[];
         acceptedDecisions: string[];
@@ -92,6 +104,7 @@ type RuntimeRequest = {
           summary: string;
           status: string;
           kind: string;
+          disposition: string;
           currentUnderstanding: string;
           proposedDirection: string;
           openQuestions: string[];
@@ -100,6 +113,24 @@ type RuntimeRequest = {
       history: Array<{ role: "user" | "owner"; text: string; timestamp: string }>;
       message: string;
       activeTopicId: string;
+    }
+  | {
+      mode: "global_chat_route";
+      message: string;
+      recentMessages: Array<{
+        role: "user" | "owner" | "system";
+        text: string;
+        projectID?: string;
+        projectName?: string;
+        timestamp: string;
+      }>;
+      projects: ProjectSummary[];
+    }
+  | {
+      mode: "collaboration_steward";
+      collaborationProfile: unknown;
+      history: Array<{ role: "user" | "owner"; text: string; timestamp: string }>;
+      message: string;
     }
   | {
       mode: "brief";
@@ -184,12 +215,21 @@ const stewardSchema = {
     summary: { type: "string" },
     worklineAction: {
       type: "string",
-      enum: ["none", "continue_existing", "start_new", "complete_existing", "resume_existing"],
+      enum: ["none", "continue_existing", "start_new", "complete_existing"],
     },
     worklineId: { type: "string" },
     worklineTitle: { type: "string" },
     worklineObjective: { type: "string" },
     branchFromWorklineId: { type: "string" },
+    isParallel: { type: "boolean" },
+    nextFocusedWorklineId: { type: "string" },
+    closureDisposition: {
+      type: "string",
+      enum: ["none", "completed", "future_decision", "awaiting_verification"],
+    },
+    carryoverTitle: { type: "string" },
+    carryoverSummary: { type: "string" },
+    carryoverQuestions: { type: "array", items: { type: "string" } },
     kind: {
       type: "string",
       enum: [
@@ -201,8 +241,6 @@ const stewardSchema = {
         "accepted",
         "integrated",
         "operational",
-        "interruption",
-        "resumed",
         "completed",
       ],
     },
@@ -237,12 +275,38 @@ const stewardSchema = {
     "worklineTitle",
     "worklineObjective",
     "branchFromWorklineId",
+    "isParallel",
+    "nextFocusedWorklineId",
+    "closureDisposition",
+    "carryoverTitle",
+    "carryoverSummary",
+    "carryoverQuestions",
     "kind",
     "stage",
     "delivery",
     "facts",
     "openIssues",
   ],
+  additionalProperties: false,
+} as const;
+
+const batchStewardSchema = {
+  type: "object",
+  properties: {
+    decisions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          segmentId: { type: "string" },
+          result: stewardSchema,
+        },
+        required: ["segmentId", "result"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["decisions"],
   additionalProperties: false,
 } as const;
 
@@ -261,6 +325,10 @@ const ownerChatSchema = {
           summary: { type: "string" },
           status: { type: "string", enum: ["captured", "discussing"] },
           kind: { type: "string", enum: ["product", "frontend", "backend"] },
+          disposition: {
+            type: "string",
+            enum: ["futureDecision", "awaitingVerification"],
+          },
           currentUnderstanding: { type: "string" },
           proposedDirection: { type: "string" },
           deferredReason: { type: "string" },
@@ -271,7 +339,7 @@ const ownerChatSchema = {
           noteDetail: { type: "string" },
         },
         required: [
-          "action", "topicId", "title", "summary", "status", "kind",
+          "action", "topicId", "title", "summary", "status", "kind", "disposition",
           "currentUnderstanding", "proposedDirection", "deferredReason",
           "revisitTrigger", "openQuestions", "noteKind", "noteTitle", "noteDetail",
         ],
@@ -477,10 +545,55 @@ function constrainedRebuildSchema(distilledCorpus: string): object {
     const items = evidence?.items as Record<string, unknown> | undefined;
     if (items) items.enum = Array.from(allowedIds).sort();
     for (const value of Object.values(record)) constrain(value);
-  };
+};
+
   constrain(schema);
   return schema;
 }
+
+const globalChatRouteSchema = {
+  type: "object",
+  properties: {
+    projectId: { type: "string" },
+    reason: { type: "string" },
+  },
+  required: ["projectId", "reason"],
+  additionalProperties: false,
+} as const;
+
+const collaborationStewardSchema = {
+  type: "object",
+  properties: {
+    reply: { type: "string" },
+    mutations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["create", "update", "supersede"] },
+          authority: { type: "string", enum: ["explicit_user", "inference"] },
+          id: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["userPersona", "collaboratorPersona", "preference", "rule", "loop", "prohibition"],
+          },
+          status: { type: "string", enum: ["active", "candidate", "superseded"] },
+          title: { type: "string" },
+          detail: { type: "string" },
+          scope: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } },
+          supersedesId: { type: "string" },
+        },
+        required: [
+          "action", "authority", "id", "kind", "status", "title", "detail", "scope", "evidence", "supersedesId",
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["reply", "mutations"],
+  additionalProperties: false,
+} as const;
 
 async function readRequest(): Promise<RuntimeRequest> {
   const path = process.argv[2];
@@ -550,18 +663,56 @@ You also own the project-internal workline lifecycle. A workline is a bounded st
 - Use continue_existing when the turn advances an existing supplied workline.
 - Use start_new when the turn clearly interrupts or diverges into an independently completable scope. A phrase such as "slightly interrupting" is only a signal; the semantic purpose and completion condition decide.
 - Use complete_existing when this turn actually closes the bounded scope. Do not complete work merely because discussion paused.
-- Use resume_existing when a waiting or parked supplied workline becomes active again.
 - Use none only for no_change or a project-wide delta that genuinely belongs to no bounded workline.
+
+The project has one explicit focused workline. Changing focus does not automatically mean parallel work.
+- Set isParallel true only when the evidence shows the previous focused workline is still being actively advanced at the same time.
+- Otherwise set isParallel false. When the turn moves to another workline, the previous focus ends rather than remaining parked.
+- For complete_existing, set nextFocusedWorklineId to the workline that should become the current focus, or empty when no workline is current.
+- For every other action, leave nextFocusedWorklineId empty.
+
+Whenever a workline ends, classify what remains:
+- completed: its bounded result is settled and nothing needs later attention;
+- awaiting_verification: implementation or action ended, but success, acceptance, external feedback, or a later result is still unknown;
+- future_decision: the current execution ended, but a possible future direction still needs a decision;
+- none: no workline ends in this decision.
+Use a non-none closureDisposition when complete_existing closes worklineId, or when a non-parallel focus switch ends the previous focused workline. For awaiting_verification and future_decision, provide a concise carryoverTitle, carryoverSummary, and any carryoverQuestions. Leave carryover fields empty for none and completed.
 
 Connected decisions under one purpose stay together. For example, display/highlight rules and folding rules are one workline when both are parts of confirming and optimizing the same material-graph interaction model. A separate data-mapping defect with its own diagnosis and fix is a different workline.
 
-For continue_existing, complete_existing, and resume_existing, worklineId must exactly match a supplied workline. For start_new, return a stable project-prefixed kebab-case id, concise title and objective, plus branchFromWorklineId identifying the active parent scope; leave branchFromWorklineId empty only when branching from the true project mainline. Empty unused workline strings are required for none. Never reuse the broad parent workline merely because no narrower one exists.
+For continue_existing and complete_existing, worklineId must exactly match a supplied workline. For start_new, return a stable project-prefixed kebab-case id, concise title and objective, plus branchFromWorklineId identifying the semantic parent scope; leave branchFromWorklineId empty only when branching from the project itself. Empty unused workline strings are required for none. Never reuse the broad parent workline merely because no narrower one exists.
 
 PROJECT HEAD:
 ${JSON.stringify(request.project)}
 
 NEW EVIDENCE:
 ${JSON.stringify(request.segment)}
+`;
+}
+
+function batchStewardPrompt(request: Extract<RuntimeRequest, { mode: "batch_steward" }>): string {
+  return `You are the Project Steward for exactly one project. Process every supplied completed Codex turn in chronological order while maintaining the evolving workline state.
+
+Return exactly one decision for every segmentId, in the same order, with no duplicates. Each decision follows the same rules as the single-turn Project Steward:
+- no_change for chatter, repetition, or intermediate debugging with no durable consequence;
+- ordinary_delta for durable decisions, implementation, verification, operations, or corrections;
+- worklines are bounded streams with independent purposes and completion conditions, not pages, modules, conversations, or turns;
+- continue the same workline when the purpose remains the same;
+- start a new workline only for independently completable scope;
+- complete a workline when its bounded deliverable closes, even when user acceptance remains separately unverified;
+- changing focus is not parallel work. Set isParallel true only when evidence shows both scopes remain actively advancing;
+- when focus switches and isParallel is false, the previous focus ends; use closureDisposition to say whether it is settled or leaves a future-decision / verification topic;
+- for complete_existing, nextFocusedWorklineId identifies the workline that becomes current, or is empty when none does.
+- closureDisposition is none when no workline ends. It is completed for settled work, awaiting_verification when a result or acceptance is still unknown, and future_decision when later product choice remains.
+- for awaiting_verification and future_decision, provide concise carryoverTitle, carryoverSummary, and carryoverQuestions; otherwise leave them empty.
+
+Simulate the consequences of each earlier decision before deciding the next one. A later turn may continue, complete, or switch away from a workline created by an earlier turn in this same batch. Use stable project-prefixed ids for new worklines. Do not inspect files or use tools. Never infer user acceptance, rendered behavior, integration, or publication without direct evidence.
+
+PROJECT HEAD:
+${JSON.stringify(request.project)}
+
+ORDERED NEW EVIDENCE:
+${JSON.stringify(request.segments)}
 `;
 }
 
@@ -572,7 +723,7 @@ Talk with the user directly in Chinese. Help them reason about unfinished topics
 
 Do not behave like a passive recorder or a generic assistant. Form an independent view, identify contradictions, and distinguish confirmed project facts from your inference. Keep the reply concise enough for an ongoing conversation.
 
-The user's new ideas, possible directions, future work, and unresolved product questions are NOT confirmed project facts. Discuss them and persist them as captured or discussing topics. Never label a new proposal as confirmed. Only the user-facing confirmation UI can promote a topic into the formal project flow; you cannot confirm decisions or create tasks.
+The user's new ideas, possible directions, future work, and unresolved product questions are NOT confirmed project facts. Discuss them and persist them as captured or discussing topics. Use futureDecision when the user has not decided whether to do something. Use awaitingVerification only when work already happened but its completion, result, acceptance, or external feedback remains unknown. Never label a new proposal as confirmed. Only the user-facing confirmation UI can promote a topic into the formal project flow; you cannot confirm decisions or create tasks.
 
 Return topicUpdates when this turn creates durable unfinished work or materially changes an existing topic. Ordinary questions or chatter may return an empty array. Prefer updating ACTIVE TOPIC when supplied. Otherwise match an existing topic semantically before creating one. A single user turn should normally create at most one evolving topic: keep connected ideas together as one topic with multiple questions instead of fragmenting them. Split only when the user explicitly identifies independent backlog items. A correction must update the topic and append a userCorrection note. Use a stable kebab-case topicId for creation. Do not claim in reply that anything was approved, implemented, or scheduled.
 
@@ -584,6 +735,46 @@ ${JSON.stringify(request.history)}
 
 ACTIVE TOPIC:
 ${request.activeTopicId || "none"}
+
+USER MESSAGE:
+${request.message}
+`;
+}
+
+function globalChatRoutePrompt(request: Extract<RuntimeRequest, { mode: "global_chat_route" }>): string {
+  return `You route one global Workstate chat message to exactly one existing Project Owner.
+
+Choose the project whose durable purpose and current summary best match the user's message. Use recent messages only for conversational continuity. Return an exact existing projectId. Do not analyze the product question, update project state, create a project, or reply to the user. Keep reason to one short Chinese sentence.
+
+PROJECTS:
+${JSON.stringify(request.projects)}
+
+RECENT GLOBAL CHAT:
+${JSON.stringify(request.recentMessages)}
+
+USER MESSAGE:
+${request.message}
+`;
+}
+
+function collaborationStewardPrompt(request: Extract<RuntimeRequest, { mode: "collaboration_steward" }>): string {
+  return `You maintain a provider-neutral collaboration profile shared by the user and future AI collaborators.
+
+Talk directly in concise Chinese. Help the user inspect and refine Persona, preferences, rules, loops, and prohibitions at a general level. Do not turn project-specific details or a one-off mood into universal rules.
+
+Mutation authority:
+- An explicit user instruction, correction, approval, or prohibition may create or update an active entry.
+- Your own inference may only create a candidate entry.
+- Set authority to explicit_user only when the current user message itself directly states, approves, revises, or rejects the rule. Otherwise set inference.
+- Never silently supersede an active entry. Do it only when the user explicitly revises or rejects it.
+- Use stable kebab-case ids. For update, preserve the existing id. Keep evidence as short quotes or exact source labels supplied in the conversation.
+- Ordinary discussion may return no mutations.
+
+CURRENT PROFILE:
+${JSON.stringify(request.collaborationProfile)}
+
+RECENT CONVERSATION:
+${JSON.stringify(request.history)}
 
 USER MESSAGE:
 ${request.message}
@@ -711,6 +902,12 @@ async function main(): Promise<void> {
       ? batchRoutePrompt(request)
     : request.mode === "steward"
       ? stewardPrompt(request)
+    : request.mode === "batch_steward"
+      ? batchStewardPrompt(request)
+      : request.mode === "collaboration_steward"
+        ? collaborationStewardPrompt(request)
+      : request.mode === "global_chat_route"
+        ? globalChatRoutePrompt(request)
       : request.mode === "owner_chat"
         ? ownerChatPrompt(request)
       : request.mode === "brief"
@@ -724,6 +921,12 @@ async function main(): Promise<void> {
       ? batchRouteSchema
     : request.mode === "steward"
       ? stewardSchema
+    : request.mode === "batch_steward"
+      ? batchStewardSchema
+      : request.mode === "collaboration_steward"
+        ? collaborationStewardSchema
+      : request.mode === "global_chat_route"
+        ? globalChatRouteSchema
       : request.mode === "owner_chat"
         ? ownerChatSchema
       : request.mode === "brief"

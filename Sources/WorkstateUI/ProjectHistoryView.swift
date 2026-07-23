@@ -53,6 +53,13 @@ struct ProjectWorkspaceView: View {
                                 title: title,
                                 detail: detail
                             )
+                        },
+                        onResolveTopic: { topicID, resolution in
+                            model.resolveTopic(
+                                projectID: project.id,
+                                topicID: topicID,
+                                resolution: resolution
+                            )
                         }
                     )
                 case .owner:
@@ -149,6 +156,25 @@ struct ProjectWorkspaceView: View {
                 }
 
                 Spacer(minLength: 8)
+
+                Button {
+                    model.copyHandoffPrompt(projectID: project.id)
+                } label: {
+                    Image(
+                        systemName: model.copiedHandoffProjectID == project.id
+                            ? "checkmark"
+                            : "doc.on.doc"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .controlSize(.large)
+                .help(
+                    model.copiedHandoffProjectID == project.id
+                        ? "已复制交接 Prompt"
+                        : "复制项目交接 Prompt"
+                )
+                .accessibilityLabel("复制项目交接 Prompt")
 
                 HStack(spacing: 5) {
                     Circle()

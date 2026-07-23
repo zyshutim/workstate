@@ -17,6 +17,21 @@ public struct WorkstateRootView: View {
                 SettingsView(model: model)
             } else if model.isDailyBriefPresented {
                 DailyBriefView(model: model)
+            } else if model.isGlobalChatPresented {
+                GlobalChatView(
+                    conversation: model.globalConversation,
+                    isSending: model.isGlobalChatSending,
+                    onClose: model.closeGlobalChat,
+                    onSend: model.sendGlobalMessage
+                )
+            } else if model.isCollaborationPresented {
+                CollaborationProfileView(
+                    profile: model.collaborationProfile,
+                    conversation: model.collaborationConversation,
+                    isSending: model.isCollaborationSending,
+                    onClose: model.closeCollaborationProfile,
+                    onSend: model.sendCollaborationMessage
+                )
             } else if let project = model.selectedProject {
                 ProjectWorkspaceView(project: project, model: model)
             } else {
@@ -30,6 +45,36 @@ public struct WorkstateRootView: View {
             if let errorMessage = model.errorMessage {
                 ErrorBanner(message: errorMessage)
                     .padding(10)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !model.needsOnboarding,
+               !model.isSettingsPresented,
+               !model.isDailyBriefPresented,
+               !model.isGlobalChatPresented,
+               !model.isCollaborationPresented {
+                HStack(spacing: 10) {
+                    Button(action: model.presentCollaborationProfile) {
+                        Label("协作档案", systemImage: "person.text.rectangle")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .help("协作档案")
+
+                    Button(action: model.presentGlobalChat) {
+                        Label("和 Project Owner 讨论", systemImage: "message.fill")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .tint(WorkstateTheme.activeState)
+                    .help("和 Project Owner 讨论")
+                }
+                .padding(.trailing, 16)
+                .padding(.bottom, 100)
             }
         }
         .onReceive(refreshTimer) { _ in

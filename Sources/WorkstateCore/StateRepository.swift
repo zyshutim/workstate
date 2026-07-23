@@ -221,6 +221,14 @@ public struct WorkstateRepository: Sendable {
             guard eventIDs.count == project.events.count else {
                 throw WorkstateStorageError.invalidState("Duplicate event id in \(project.id)")
             }
+            if let focusedTaskID = project.focusedTaskID {
+                guard let focusedTask = project.tasks.first(where: { $0.id == focusedTaskID }) else {
+                    throw WorkstateStorageError.invalidState("Project \(project.id) focuses an unknown task")
+                }
+                guard focusedTask.status == .active else {
+                    throw WorkstateStorageError.invalidState("Project \(project.id) focuses an inactive task")
+                }
+            }
             let revisionIDs = Set(project.context.revisions.map(\.id))
             guard revisionIDs.count == project.context.revisions.count else {
                 throw WorkstateStorageError.invalidState("Duplicate context revision id in \(project.id)")
