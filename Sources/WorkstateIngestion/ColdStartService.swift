@@ -231,8 +231,14 @@ public struct ColdStartService: Sendable {
                 }
 
                 if route.action == "ignore" {
-                    try scanner.completeProcessing(segmentID: segment.id)
-                    try scanner.markProcessed(segmentIDs: [segment.id])
+                    try scanner.commitProcessed([
+                        ProcessedSegmentRoute(
+                            segmentID: segment.id,
+                            threadID: segment.threadID,
+                            turnID: segment.turnID,
+                            projectID: nil
+                        )
+                    ])
                     continue
                 }
 
@@ -242,11 +248,6 @@ public struct ColdStartService: Sendable {
                     service: service
                 )
                 grouped[project.id, default: []].append(segment)
-                try scanner.recordRoute(
-                    threadID: segment.threadID,
-                    turnID: segment.turnID,
-                    projectID: project.id
-                )
             }
         }
 
@@ -265,10 +266,10 @@ public struct ColdStartService: Sendable {
             try FileManager.default.createDirectory(at: rebuildRoot, withIntermediateDirectories: true)
             let fingerprint = evidenceFingerprint(projectSegments)
             let distillationURL = rebuildRoot.appendingPathComponent(
-                "\(projectID)-\(fingerprint)-distilled.jsonl"
+                "\(projectID)-\(fingerprint)-v3-distilled.jsonl"
             )
             let proposalURL = rebuildRoot.appendingPathComponent(
-                "\(projectID)-\(fingerprint)-proposal.json"
+                "\(projectID)-\(fingerprint)-v3-proposal.json"
             )
             let existingDistillations: [RebuildDistilledChunk] = try readJSONLines(
                 RebuildDistilledChunk.self,
@@ -276,7 +277,7 @@ public struct ColdStartService: Sendable {
             )
             var distilledByIndex: [Int: RebuildDistilledChunk] = [:]
             for item in existingDistillations
-                where item.schemaVersion == 2
+                where item.schemaVersion == 3
                     && item.chunkCount == chunks.count
                     && item.chunkIndex < chunks.count
                     && item.evidenceIds == chunks[item.chunkIndex].map(\.id) {
@@ -326,6 +327,12 @@ public struct ColdStartService: Sendable {
             let proposal: ProjectRebuildProposal
             try cancellation.check()
             if FileManager.default.fileExists(atPath: proposalURL.path) {
+                let size = try proposalURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size <= 8 * 1024 * 1024 else {
+                    throw WorkstateStorageError.invalidState(
+                        "Cold-start proposal exceeded 8 MiB"
+                    )
+                }
                 proposal = try WorkstateCoding.makeDecoder().decode(
                     ProjectRebuildProposal.self,
                     from: Data(contentsOf: proposalURL)
@@ -342,7 +349,13 @@ public struct ColdStartService: Sendable {
                     sourceThreadIDs: Array(Set(projectSegments.map(\.threadID))).sorted(),
                     scanner: scanner
                 )
-                try WorkstateCoding.makeEncoder().encode(proposal).write(
+                let proposalData = try WorkstateCoding.makeEncoder().encode(proposal)
+                guard proposalData.count <= 8 * 1024 * 1024 else {
+                    throw WorkstateStorageError.invalidState(
+                        "Cold-start proposal exceeded 8 MiB"
+                    )
+                }
+                try proposalData.write(
                     to: proposalURL,
                     options: .atomic
                 )
@@ -351,10 +364,16 @@ public struct ColdStartService: Sendable {
                 proposal,
                 evidence: projectSegments
             )
-            for segment in projectSegments {
-                try scanner.completeProcessing(segmentID: segment.id)
-            }
-            try scanner.markProcessed(segmentIDs: projectSegments.map(\.id))
+            try scanner.commitProcessed(
+                projectSegments.map {
+                    ProcessedSegmentRoute(
+                        segmentID: $0.id,
+                        threadID: $0.threadID,
+                        turnID: $0.turnID,
+                        projectID: projectID
+                    )
+                }
+            )
         }
 
         try cancellation.check()
@@ -458,7 +477,7 @@ public struct ColdStartService: Sendable {
                 )
             }
             fallthrough
-        case "switch_project":
+        case "select_project", "switch_project":
             guard let project = workspace.project(id: route.projectId) else {
                 throw WorkstateStorageError.missingProject(route.projectId)
             }
@@ -523,6 +542,11 @@ public struct ColdStartService: Sendable {
         for value in values {
             data.append(try encoder.encode(value))
             data.append(0x0A)
+            guard data.count <= 16 * 1024 * 1024 else {
+                throw WorkstateStorageError.invalidState(
+                    "Cold-start distillation exceeded 16 MiB"
+                )
+            }
         }
         try data.write(to: url, options: .atomic)
     }
@@ -532,6 +556,12 @@ public struct ColdStartService: Sendable {
         from url: URL
     ) throws -> [Value] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= 16 * 1024 * 1024 else {
+            throw WorkstateStorageError.invalidState(
+                "Cold-start distillation exceeded 16 MiB"
+            )
+        }
         return try Data(contentsOf: url).split(separator: 0x0A).map {
             try WorkstateCoding.makeDecoder().decode(type, from: Data($0))
         }

@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import WorkstateCore
 
@@ -14,6 +15,7 @@ public struct SessionSegment: Codable, Equatable, Identifiable, Sendable {
     public var assistantText: String
     public var timestamp: Date
     public var relatedTurnIDs: [String]?
+    public var sourceSpans: [ConversationSourceSpan]?
 
     public init(
         threadID: String,
@@ -25,7 +27,8 @@ public struct SessionSegment: Codable, Equatable, Identifiable, Sendable {
         userText: String,
         assistantText: String,
         timestamp: Date,
-        relatedTurnIDs: [String]? = nil
+        relatedTurnIDs: [String]? = nil,
+        sourceSpans: [ConversationSourceSpan]? = nil
     ) {
         id = "\(threadID):\(turnID)"
         self.threadID = threadID
@@ -38,6 +41,7 @@ public struct SessionSegment: Codable, Equatable, Identifiable, Sendable {
         self.assistantText = assistantText
         self.timestamp = timestamp
         self.relatedTurnIDs = relatedTurnIDs
+        self.sourceSpans = sourceSpans
     }
 }
 
@@ -110,7 +114,9 @@ public struct IngestionSnapshot: Codable, Equatable, Sendable {
     public var pendingSegmentIDs: [String]
     public var excludedThreadIDs: [String]
     public var routeBindings: [String: ThreadRouteBinding]?
+    public var routeBindingHistory: [String: [ThreadRouteBinding]]?
     public var processingRecords: [String: SegmentProcessingRecord]?
+    public var stewardBatches: [String: StewardBatchProcessingRecord]?
     public var lastScanAt: Date?
 
     public init(
@@ -119,7 +125,9 @@ public struct IngestionSnapshot: Codable, Equatable, Sendable {
         pendingSegmentIDs: [String] = [],
         excludedThreadIDs: [String] = [],
         routeBindings: [String: ThreadRouteBinding]? = nil,
+        routeBindingHistory: [String: [ThreadRouteBinding]]? = nil,
         processingRecords: [String: SegmentProcessingRecord]? = nil,
+        stewardBatches: [String: StewardBatchProcessingRecord]? = nil,
         lastScanAt: Date? = nil
     ) {
         self.initialized = initialized
@@ -127,7 +135,9 @@ public struct IngestionSnapshot: Codable, Equatable, Sendable {
         self.pendingSegmentIDs = pendingSegmentIDs
         self.excludedThreadIDs = excludedThreadIDs
         self.routeBindings = routeBindings
+        self.routeBindingHistory = routeBindingHistory
         self.processingRecords = processingRecords
+        self.stewardBatches = stewardBatches
         self.lastScanAt = lastScanAt
     }
 }
@@ -148,6 +158,7 @@ public struct SegmentProcessingRecord: Codable, Equatable, Sendable {
     public var stage: SegmentProcessingStage
     public var route: RouteResult?
     public var steward: StewardResult?
+    public var batchID: String?
     public var failedStage: SegmentProcessingStage?
     public var error: String
     public var updatedAt: Date
@@ -157,6 +168,7 @@ public struct SegmentProcessingRecord: Codable, Equatable, Sendable {
         stage: SegmentProcessingStage = .queued,
         route: RouteResult? = nil,
         steward: StewardResult? = nil,
+        batchID: String? = nil,
         failedStage: SegmentProcessingStage? = nil,
         error: String = "",
         updatedAt: Date = Date()
@@ -165,8 +177,81 @@ public struct SegmentProcessingRecord: Codable, Equatable, Sendable {
         self.stage = stage
         self.route = route
         self.steward = steward
+        self.batchID = batchID
         self.failedStage = failedStage
         self.error = error
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct StewardBatchProcessingRecord: Codable, Equatable, Sendable {
+    public var id: String
+    public var projectID: String
+    public var segmentIDs: [String]
+    public var result: BatchStewardResult
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        projectID: String,
+        segmentIDs: [String],
+        result: BatchStewardResult,
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.projectID = projectID
+        self.segmentIDs = segmentIDs
+        self.result = result
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct ProcessedSegmentRoute: Codable, Sendable {
+    public var segmentID: String
+    public var threadID: String
+    public var turnID: String
+    public var projectID: String?
+
+    public init(
+        segmentID: String,
+        threadID: String,
+        turnID: String,
+        projectID: String?
+    ) {
+        self.segmentID = segmentID
+        self.threadID = threadID
+        self.turnID = turnID
+        self.projectID = projectID
+    }
+}
+
+public struct OpenSemanticBundle: Codable, Equatable, Sendable {
+    public var id: String
+    public var threadID: String
+    public var projectID: String
+    public var disposition: String
+    public var title: String
+    public var summary: String
+    public var evidenceIDs: [String]
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        threadID: String,
+        projectID: String,
+        disposition: String,
+        title: String,
+        summary: String,
+        evidenceIDs: [String],
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.threadID = threadID
+        self.projectID = projectID
+        self.disposition = disposition
+        self.title = title
+        self.summary = summary
+        self.evidenceIDs = evidenceIDs
         self.updatedAt = updatedAt
     }
 }
@@ -192,6 +277,7 @@ public struct SessionCursor: Codable, Equatable, Sendable {
     public var activeTurnID: String
     public var activeTurnOffset: UInt64
     public var userText: String
+    public var sourceSpans: [ConversationSourceSpan]?
     public var lastActivityAt: Date?
     public var isInternalAgentSession: Bool?
 
@@ -202,6 +288,7 @@ public struct SessionCursor: Codable, Equatable, Sendable {
         activeTurnID: String = "",
         activeTurnOffset: UInt64 = 0,
         userText: String = "",
+        sourceSpans: [ConversationSourceSpan]? = nil,
         lastActivityAt: Date? = nil,
         isInternalAgentSession: Bool? = nil
     ) {
@@ -211,6 +298,7 @@ public struct SessionCursor: Codable, Equatable, Sendable {
         self.activeTurnID = activeTurnID
         self.activeTurnOffset = activeTurnOffset
         self.userText = userText
+        self.sourceSpans = sourceSpans
         self.lastActivityAt = lastActivityAt
         self.isInternalAgentSession = isInternalAgentSession
     }
@@ -222,20 +310,18 @@ public struct ScannerDiagnostics: Equatable, Sendable {
     public var metadataReads = 0
     public var metadataBytesRead: UInt64 = 0
     public var evidenceIndexLoads = 0
+    public var sourceResolutionBytesRead: UInt64 = 0
+    public var recentContextFailures = 0
+    public var repairedLegacyPointerHashes = 0
 }
 
 private final class SessionScannerStorage: @unchecked Sendable {
     let lock = NSRecursiveLock()
     var state: IngestionSnapshot?
-    var evidenceLocations: [String: EvidenceLocation]?
+    var sourceIndex: ConversationSourceIndex?
+    var cursorsDirty = false
+    var persistAllCursors = false
     var diagnostics = ScannerDiagnostics()
-}
-
-private struct EvidenceLocation {
-    var offset: UInt64
-    var length: Int
-    var threadID: String
-    var timestamp: Date
 }
 
 private struct SessionMetadata {
@@ -245,18 +331,27 @@ private struct SessionMetadata {
     var createdAt: Date?
 }
 
+private struct ResolvedConversationMessages {
+    var user: [String]
+    var assistant: String
+    var completionTurnID: String
+}
+
 public struct CodexSessionScanner: Sendable {
     public let sessionsRoot: URL
     public let runtimeRoot: URL
+    public let retainsLegacyPendingState: Bool
     private let storage: SessionScannerStorage
 
     public init(
         sessionsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/sessions", isDirectory: true),
-        runtimeRoot: URL = WorkstatePaths.defaultPaths().root
+        runtimeRoot: URL = WorkstatePaths.defaultPaths().root,
+        retainsLegacyPendingState: Bool = true
     ) {
         self.sessionsRoot = canonicalFileURL(sessionsRoot)
         self.runtimeRoot = canonicalFileURL(runtimeRoot)
+        self.retainsLegacyPendingState = retainsLegacyPendingState
         storage = SessionScannerStorage()
     }
 
@@ -268,10 +363,18 @@ public struct CodexSessionScanner: Sendable {
         runtimeRoot.appendingPathComponent("evidence.jsonl")
     }
 
+    public var sourceIndexURL: URL {
+        runtimeRoot.appendingPathComponent("conversation-source-index.sqlite")
+    }
+
     public func scan(minimumTimestamp: Date? = nil) throws -> [SessionSegment] {
         try synchronized {
             storage.diagnostics.fullScans += 1
-            return try scanUnlocked(files: sessionFiles(), minimumTimestamp: minimumTimestamp)
+            return try scanUnlocked(
+                files: sessionFiles(),
+                minimumTimestamp: minimumTimestamp,
+                prunesMissingCursors: true
+            )
         }
     }
 
@@ -293,7 +396,8 @@ public struct CodexSessionScanner: Sendable {
             })
             return try scanUnlocked(
                 files: files.sorted { $0.path < $1.path },
-                minimumTimestamp: minimumTimestamp
+                minimumTimestamp: minimumTimestamp,
+                prunesMissingCursors: false
             )
         }
     }
@@ -302,7 +406,36 @@ public struct CodexSessionScanner: Sendable {
         synchronized { storage.diagnostics }
     }
 
-    private func scanUnlocked(files: [URL], minimumTimestamp: Date?) throws -> [SessionSegment] {
+    public func knownSessionPathsWithSizeChanges() throws -> [String] {
+        try synchronized {
+            let state = try loadStateUnlocked()
+            return try state.cursors.compactMap { path, cursor in
+                // Deleted files are pruned by the low-frequency full reconciliation.
+                // Returning them here would make the fast poll report the same
+                // non-existent path forever.
+                guard FileManager.default.fileExists(atPath: path) else { return nil }
+                let fileSize = try size(of: URL(fileURLWithPath: path))
+                return fileSize == cursor.offset ? nil : path
+            }
+            .sorted()
+        }
+    }
+
+    public func latestActivityAt(threadID: String) throws -> Date? {
+        try synchronized {
+            let state = try loadStateUnlocked()
+            return state.cursors.values
+                .filter { $0.threadID == threadID }
+                .compactMap(\.lastActivityAt)
+                .max()
+        }
+    }
+
+    private func scanUnlocked(
+        files: [URL],
+        minimumTimestamp: Date?,
+        prunesMissingCursors: Bool
+    ) throws -> [SessionSegment] {
         try FileManager.default.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
         var state = try loadStateUnlocked()
         let previousState = state
@@ -311,12 +444,11 @@ public struct CodexSessionScanner: Sendable {
         if !state.initialized {
             for file in files {
                 let cursor = try primeCursor(for: file)
-                state.cursors[file.path] = cursor
-                if !cursor.threadID.isEmpty, cursor.isInternalAgentSession == true {
-                    state.excludedThreadIDs.append(cursor.threadID)
+                if cursor.isInternalAgentSession != true {
+                    state.cursors[file.path] = cursor
                 }
             }
-            state.excludedThreadIDs = Array(Set(state.excludedThreadIDs)).sorted()
+            state.excludedThreadIDs = []
             state.initialized = true
             state.lastScanAt = Date()
             try saveState(state)
@@ -324,6 +456,10 @@ public struct CodexSessionScanner: Sendable {
         }
 
         var excludedThreadIDs = Set(state.excludedThreadIDs)
+        let scannedPaths = Set(files.map(\.path))
+        if prunesMissingCursors {
+            state.cursors = state.cursors.filter { scannedPaths.contains($0.key) }
+        }
         for file in files {
             var cursor = state.cursors[file.path] ?? SessionCursor()
             let fileSize = try size(of: file)
@@ -342,18 +478,14 @@ public struct CodexSessionScanner: Sendable {
             }
             if cursor.isInternalAgentSession == true {
                 if !cursor.threadID.isEmpty {
-                    excludedThreadIDs.insert(cursor.threadID)
+                    excludedThreadIDs.remove(cursor.threadID)
                 }
-                cursor.offset = fileSize
-                cursor.activeTurnID = ""
-                cursor.userText = ""
-                cursor.lastActivityAt = nil
-                state.cursors[file.path] = cursor
+                state.cursors.removeValue(forKey: file.path)
                 continue
             }
             if excludedThreadIDs.contains(cursor.threadID) {
-                cursor.offset = fileSize
-                state.cursors[file.path] = cursor
+                excludedThreadIDs.remove(cursor.threadID)
+                state.cursors.removeValue(forKey: file.path)
                 continue
             }
             if fileSize < cursor.offset {
@@ -377,29 +509,42 @@ public struct CodexSessionScanner: Sendable {
         state.excludedThreadIDs = excludedThreadIDs.sorted()
 
         if !segments.isEmpty {
-            let knownEvidenceIDs = Set(try evidenceLocationIndex().keys)
             segments = Array(Dictionary(
                 segments.map { ($0.id, $0) },
                 uniquingKeysWith: { _, latest in latest }
             ).values)
-            .filter { !knownEvidenceIDs.contains($0.id) }
             .sorted { $0.timestamp < $1.timestamp }
-            try appendEvidence(segments)
-            let existing = Set(state.pendingSegmentIDs)
-            state.pendingSegmentIDs.append(contentsOf: segments.map(\.id).filter { !existing.contains($0) })
-            var processing = state.processingRecords ?? [:]
-            for segment in segments where processing[segment.id] == nil {
-                processing[segment.id] = SegmentProcessingRecord(segmentID: segment.id)
+            let index = try sourceIndex()
+            let newSegments = try segments.filter {
+                try index.pointer(id: sourcePointerID(for: $0)) == nil
             }
-            state.processingRecords = processing
+            try storeSourcePointers(newSegments, in: index)
+            segments = try segments.filter {
+                try index.pointer(id: sourcePointerID(for: $0))?.processingState == .pending
+            }
+            if retainsLegacyPendingState {
+                let existing = Set(state.pendingSegmentIDs)
+                state.pendingSegmentIDs.append(
+                    contentsOf: segments.map(\.id).filter { !existing.contains($0) }
+                )
+            }
         }
+        let cursorsChanged = state.cursors != previousState.cursors
         var comparableState = state
+        comparableState.cursors = [:]
         comparableState.lastScanAt = previousState.lastScanAt
-        if comparableState != previousState {
+        var comparablePreviousState = previousState
+        comparablePreviousState.cursors = [:]
+        let durableStateChanged = comparableState != comparablePreviousState
+        if durableStateChanged {
             state.lastScanAt = Date()
+        }
+        if durableStateChanged || cursorsChanged {
             try saveState(state)
         }
-        return try loadPendingSegments(ids: state.pendingSegmentIDs)
+        return retainsLegacyPendingState
+            ? try loadPendingSegments(ids: state.pendingSegmentIDs)
+            : segments
     }
 
     public func sessionCatalog(
@@ -458,8 +603,8 @@ public struct CodexSessionScanner: Sendable {
                     continue
                 }
                 if metadata.isInternalAgentSession {
-                    excluded.insert(metadata.threadID)
-                    state.cursors[file.path] = try primeCursor(for: file)
+                    excluded.remove(metadata.threadID)
+                    state.cursors.removeValue(forKey: file.path)
                     continue
                 }
 
@@ -489,13 +634,16 @@ public struct CodexSessionScanner: Sendable {
             )
             .sorted { $0.timestamp < $1.timestamp }
 
-            let known = Set(try evidenceLocationIndex().keys)
-            let newSegments = imported.filter { !known.contains($0.id) }
-            if !newSegments.isEmpty {
-                try appendEvidence(newSegments)
+            let index = try sourceIndex()
+            let newSegments = try imported.filter {
+                try index.pointer(id: sourcePointerID(for: $0)) == nil
             }
+            try storeSourcePointers(newSegments, in: index)
 
-            let importedIDs = imported.map(\.id)
+            let importedIDs = try imported.compactMap { segment -> String? in
+                let record = try index.pointer(id: sourcePointerID(for: segment))
+                return record?.processingState == .pending ? segment.id : nil
+            }
             let pending = Set(state.pendingSegmentIDs)
             state.pendingSegmentIDs.append(contentsOf: importedIDs.filter { !pending.contains($0) })
             var records = state.processingRecords ?? [:]
@@ -555,9 +703,22 @@ public struct CodexSessionScanner: Sendable {
     public func markProcessed(segmentIDs: [String]) throws {
         try synchronized {
             guard !segmentIDs.isEmpty else { return }
-            var state = try loadState()
+            var state = try loadStateUnlocked()
             let processed = Set(segmentIDs)
+            try validateCompleteBatchCommit(processed, in: state)
             state.pendingSegmentIDs.removeAll { processed.contains($0) }
+            if var records = state.processingRecords {
+                for segmentID in processed {
+                    records.removeValue(forKey: segmentID)
+                }
+                state.processingRecords = records
+            }
+            if var batches = state.stewardBatches {
+                batches = batches.filter { _, batch in
+                    !Set(batch.segmentIDs).isSubset(of: processed)
+                }
+                state.stewardBatches = batches
+            }
             try saveState(state)
         }
     }
@@ -572,7 +733,9 @@ public struct CodexSessionScanner: Sendable {
             for segmentID in segmentIDs {
                 var record = records[segmentID] ?? SegmentProcessingRecord(segmentID: segmentID)
                 if record.stage == .failed {
-                    if record.steward != nil {
+                    if record.batchID.flatMap({ state.stewardBatches?[$0] }) != nil {
+                        record.stage = .stewarded
+                    } else if record.steward != nil {
                         record.stage = .stewarded
                     } else if record.route != nil {
                         record.stage = .routed
@@ -602,9 +765,17 @@ public struct CodexSessionScanner: Sendable {
                 case .routing:
                     record.stage = record.route == nil ? .queued : .routed
                 case .stewarding:
-                    record.stage = record.steward == nil ? .routed : .stewarded
+                    if record.batchID.flatMap({ state.stewardBatches?[$0] }) != nil {
+                        record.stage = .stewarded
+                    } else {
+                        record.stage = record.steward == nil ? .routed : .stewarded
+                    }
                 case .applying:
-                    record.stage = record.steward == nil ? .routed : .stewarded
+                    if record.batchID.flatMap({ state.stewardBatches?[$0] }) != nil {
+                        record.stage = .stewarded
+                    } else {
+                        record.stage = record.steward == nil ? .routed : .stewarded
+                    }
                 default:
                     continue
                 }
@@ -619,6 +790,37 @@ public struct CodexSessionScanner: Sendable {
                 try saveState(state)
             }
             return recovered
+        }
+    }
+
+    @discardableResult
+    public func requeueLegacyPendingRoutes() throws -> Int {
+        try synchronized {
+            var state = try loadStateUnlocked()
+            var records = state.processingRecords ?? [:]
+            var requeued = 0
+            for segmentID in state.pendingSegmentIDs {
+                guard var record = records[segmentID],
+                      let route = record.route,
+                      route.normalizedDisposition != "ignore",
+                      (route.bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      record.steward == nil,
+                      record.batchID == nil else {
+                    continue
+                }
+                record.route = nil
+                record.stage = .queued
+                record.failedStage = nil
+                record.error = ""
+                record.updatedAt = Date()
+                records[segmentID] = record
+                requeued += 1
+            }
+            if requeued > 0 {
+                state.processingRecords = records
+                try saveState(state)
+            }
+            return requeued
         }
     }
 
@@ -648,7 +850,48 @@ public struct CodexSessionScanner: Sendable {
 
     public func routeBinding(threadID: String) throws -> ThreadRouteBinding? {
         try synchronized {
-            try loadState().routeBindings?[threadID]
+            latestRouteBinding(threadID: threadID, state: try loadState())
+        }
+    }
+
+    public func routeBinding(
+        threadID: String,
+        before timestamp: Date
+    ) throws -> ThreadRouteBinding? {
+        try synchronized {
+            let state = try loadState()
+            let history = state.routeBindingHistory?[threadID]
+                ?? state.routeBindings?[threadID].map { [$0] }
+                ?? []
+            return history
+                .filter { $0.updatedAt < timestamp }
+                .max { $0.updatedAt < $1.updatedAt }
+        }
+    }
+
+    public func routeBindingHistory(threadID: String) throws -> [ThreadRouteBinding] {
+        try synchronized {
+            let state = try loadState()
+            if let history = state.routeBindingHistory?[threadID], !history.isEmpty {
+                return history.sorted { $0.updatedAt < $1.updatedAt }
+            }
+            return state.routeBindings?[threadID].map { [$0] } ?? []
+        }
+    }
+
+    public func routedThreadIDs(projectID: String) throws -> Set<String> {
+        guard !projectID.isEmpty else {
+            throw WorkstateStorageError.invalidState("Project id is required")
+        }
+        return try synchronized {
+            let state = try loadState()
+            let threadIDs = Set(state.routeBindings?.keys.map { $0 } ?? [])
+                .union(state.routeBindingHistory?.keys.map { $0 } ?? [])
+            return Set(threadIDs.compactMap { threadID in
+                latestRouteBinding(threadID: threadID, state: state)?.projectID == projectID
+                    ? threadID
+                    : nil
+            })
         }
     }
 
@@ -658,14 +901,150 @@ public struct CodexSessionScanner: Sendable {
                 throw WorkstateStorageError.invalidState("Route binding requires thread, turn, and project ids")
             }
             var state = try loadState()
-            var bindings = state.routeBindings ?? [:]
-            bindings[threadID] = ThreadRouteBinding(
+            appendRouteBinding(ThreadRouteBinding(
                 threadID: threadID,
                 turnID: turnID,
-                projectID: projectID
-            )
-            state.routeBindings = bindings
+                projectID: projectID,
+                updatedAt: Self.timestamp(fromTimeOrderedID: turnID) ?? Date()
+            ), to: &state)
             try saveState(state)
+        }
+    }
+
+    public func commitProcessed(_ routes: [ProcessedSegmentRoute]) throws {
+        try synchronized {
+            guard !routes.isEmpty else { return }
+            var state = try loadStateUnlocked()
+            let processed = Set(routes.map(\.segmentID))
+            try validateCompleteBatchCommit(processed, in: state)
+            for route in routes {
+                if let projectID = route.projectID {
+                    guard !route.threadID.isEmpty,
+                          !route.turnID.isEmpty,
+                          !projectID.isEmpty else {
+                        throw WorkstateStorageError.invalidState(
+                            "A processed route requires thread, turn, and project ids"
+                        )
+                    }
+                    appendRouteBinding(ThreadRouteBinding(
+                        threadID: route.threadID,
+                        turnID: route.turnID,
+                        projectID: projectID,
+                        updatedAt: Self.timestamp(fromTimeOrderedID: route.turnID) ?? Date()
+                    ), to: &state)
+                }
+            }
+            state.pendingSegmentIDs.removeAll { processed.contains($0) }
+            if var records = state.processingRecords {
+                for segmentID in processed {
+                    records.removeValue(forKey: segmentID)
+                }
+                state.processingRecords = records
+            }
+            let pending = Set(state.pendingSegmentIDs)
+            if var batches = state.stewardBatches {
+                batches = batches.filter { _, batch in
+                    !Set(batch.segmentIDs).isDisjoint(with: pending)
+                }
+                state.stewardBatches = batches
+            }
+            try saveState(state)
+        }
+    }
+
+    public func finalizePointerBatch(
+        successfulRoutes: [ProcessedSegmentRoute],
+        failedSegmentIDs: [String]
+    ) throws {
+        try synchronized {
+            let successfulIDs = Set(successfulRoutes.map(\.segmentID))
+            let failedIDs = Set(failedSegmentIDs)
+            guard successfulIDs.count == successfulRoutes.count,
+                  failedIDs.count == failedSegmentIDs.count,
+                  successfulIDs.isDisjoint(with: failedIDs) else {
+                throw WorkstateStorageError.invalidState(
+                    "A pointer batch must finalize unique, disjoint segment ids"
+                )
+            }
+            let finalized = successfulIDs.union(failedIDs)
+            guard !finalized.isEmpty else { return }
+            var state = try loadStateUnlocked()
+            for route in successfulRoutes {
+                if let projectID = route.projectID {
+                    guard !route.threadID.isEmpty,
+                          !route.turnID.isEmpty,
+                          !projectID.isEmpty else {
+                        throw WorkstateStorageError.invalidState(
+                            "A processed route requires thread, turn, and project ids"
+                        )
+                    }
+                    appendRouteBinding(ThreadRouteBinding(
+                        threadID: route.threadID,
+                        turnID: route.turnID,
+                        projectID: projectID,
+                        updatedAt: Self.timestamp(fromTimeOrderedID: route.turnID) ?? Date()
+                    ), to: &state)
+                }
+            }
+            state.pendingSegmentIDs.removeAll { finalized.contains($0) }
+            if var records = state.processingRecords {
+                for segmentID in finalized { records.removeValue(forKey: segmentID) }
+                state.processingRecords = records
+            }
+            if var batches = state.stewardBatches {
+                batches = batches.filter { _, batch in
+                    Set(batch.segmentIDs).isDisjoint(with: finalized)
+                }
+                state.stewardBatches = batches
+            }
+            try saveState(state)
+        }
+    }
+
+    private func latestRouteBinding(
+        threadID: String,
+        state: IngestionSnapshot
+    ) -> ThreadRouteBinding? {
+        if let history = state.routeBindingHistory?[threadID], !history.isEmpty {
+            return history.max { $0.updatedAt < $1.updatedAt }
+        }
+        return state.routeBindings?[threadID]
+    }
+
+    private func appendRouteBinding(
+        _ binding: ThreadRouteBinding,
+        to state: inout IngestionSnapshot
+    ) {
+        var history = state.routeBindingHistory ?? [:]
+        var threadHistory = history[binding.threadID]
+            ?? state.routeBindings?[binding.threadID].map { [$0] }
+            ?? []
+        threadHistory.sort { $0.updatedAt < $1.updatedAt }
+        if let existingIndex = threadHistory.firstIndex(where: { $0.turnID == binding.turnID }) {
+            threadHistory[existingIndex] = binding
+            threadHistory.sort { $0.updatedAt < $1.updatedAt }
+            history[binding.threadID] = threadHistory
+            state.routeBindingHistory = history
+            state.routeBindings?.removeValue(forKey: binding.threadID)
+            return
+        }
+        if let latest = threadHistory.last, latest.projectID == binding.projectID {
+            history[binding.threadID] = threadHistory
+            state.routeBindingHistory = history
+            state.routeBindings?.removeValue(forKey: binding.threadID)
+            if state.routeBindings?.isEmpty == true {
+                state.routeBindings = nil
+            }
+            return
+        } else {
+            threadHistory.append(binding)
+            threadHistory.sort { $0.updatedAt < $1.updatedAt }
+        }
+        history[binding.threadID] = threadHistory
+        state.routeBindingHistory = history
+        state.routeBindings?.removeValue(forKey: binding.threadID)
+        if state.routeBindings?.isEmpty == true {
+            state.routeBindings = nil
         }
     }
 
@@ -677,25 +1056,60 @@ public struct CodexSessionScanner: Sendable {
     }
 
     public func beginProcessing(segmentID: String, stage: SegmentProcessingStage) throws {
-        try updateProcessingRecord(segmentID: segmentID) { record in
+        try beginProcessing(segmentIDs: [segmentID], stage: stage)
+    }
+
+    public func beginProcessing(
+        segmentIDs: [String],
+        stage: SegmentProcessingStage
+    ) throws {
+        try synchronized {
+            guard !segmentIDs.isEmpty else { return }
             guard stage == .routing || stage == .stewarding || stage == .applying else {
-                throw WorkstateStorageError.invalidState("Unsupported active processing stage: \(stage.rawValue)")
+                throw WorkstateStorageError.invalidState(
+                    "Unsupported active processing stage: \(stage.rawValue)"
+                )
             }
-            guard record.stage != .failed && record.stage != .completed else {
-                throw WorkstateStorageError.invalidState("Segment \(segmentID) is not eligible for processing")
+            var state = try loadStateUnlocked()
+            var records = state.processingRecords ?? [:]
+            for segmentID in segmentIDs {
+                var record = records[segmentID] ?? SegmentProcessingRecord(segmentID: segmentID)
+                guard record.stage != .failed && record.stage != .completed else {
+                    throw WorkstateStorageError.invalidState(
+                        "Segment \(segmentID) is not eligible for processing"
+                    )
+                }
+                record.stage = stage
+                record.failedStage = nil
+                record.error = ""
+                record.updatedAt = Date()
+                records[segmentID] = record
             }
-            record.stage = stage
-            record.failedStage = nil
-            record.error = ""
+            state.processingRecords = records
+            try saveState(state)
         }
     }
 
     public func recordRouteResult(segmentID: String, route: RouteResult) throws {
-        try updateProcessingRecord(segmentID: segmentID) { record in
-            record.route = route
-            record.stage = .routed
-            record.failedStage = nil
-            record.error = ""
+        try recordRouteResults([segmentID: route])
+    }
+
+    public func recordRouteResults(_ routes: [String: RouteResult]) throws {
+        try synchronized {
+            guard !routes.isEmpty else { return }
+            var state = try loadStateUnlocked()
+            var records = state.processingRecords ?? [:]
+            for (segmentID, route) in routes {
+                var record = records[segmentID] ?? SegmentProcessingRecord(segmentID: segmentID)
+                record.route = route
+                record.stage = .routed
+                record.failedStage = nil
+                record.error = ""
+                record.updatedAt = Date()
+                records[segmentID] = record
+            }
+            state.processingRecords = records
+            try saveState(state)
         }
     }
 
@@ -708,6 +1122,99 @@ public struct CodexSessionScanner: Sendable {
             record.stage = .stewarded
             record.failedStage = nil
             record.error = ""
+        }
+    }
+
+    public func recordStewardBatch(
+        id: String,
+        projectID: String,
+        segmentIDs: [String],
+        result: BatchStewardResult
+    ) throws {
+        try synchronized {
+            guard !id.isEmpty,
+                  !projectID.isEmpty,
+                  !segmentIDs.isEmpty,
+                  Set(segmentIDs).count == segmentIDs.count else {
+                throw WorkstateStorageError.invalidState(
+                    "A Steward batch requires unique segments, id, and project"
+                )
+            }
+            var state = try loadStateUnlocked()
+            var records = state.processingRecords ?? [:]
+            for segmentID in segmentIDs {
+                var record = records[segmentID] ?? SegmentProcessingRecord(segmentID: segmentID)
+                guard record.route != nil else {
+                    throw WorkstateStorageError.invalidState(
+                        "Steward batch requires a persisted route for \(segmentID)"
+                    )
+                }
+                record.steward = nil
+                record.batchID = id
+                record.stage = .stewarded
+                record.failedStage = nil
+                record.error = ""
+                record.updatedAt = Date()
+                records[segmentID] = record
+            }
+            var batches = state.stewardBatches ?? [:]
+            if let existing = batches[id] {
+                guard existing.projectID == projectID,
+                      existing.segmentIDs == segmentIDs,
+                      existing.result == result else {
+                    throw WorkstateStorageError.invalidState(
+                        "A Steward batch id cannot be reused for different content"
+                    )
+                }
+            } else {
+                batches[id] = StewardBatchProcessingRecord(
+                    id: id,
+                    projectID: projectID,
+                    segmentIDs: segmentIDs,
+                    result: result
+                )
+            }
+            state.processingRecords = records
+            state.stewardBatches = batches
+            try saveState(state)
+        }
+    }
+
+    public func pendingStewardBatches() throws -> [StewardBatchProcessingRecord] {
+        try synchronized {
+            let state = try loadStateUnlocked()
+            let pending = Set(state.pendingSegmentIDs)
+            return (state.stewardBatches ?? [:]).values
+                .filter { batch in
+                    !Set(batch.segmentIDs).isDisjoint(with: pending)
+                        && batch.segmentIDs.allSatisfy { segmentID in
+                            state.processingRecords?[segmentID]?.stage == .stewarded
+                        }
+                }
+                .sorted { lhs, rhs in
+                    if lhs.updatedAt == rhs.updatedAt { return lhs.id < rhs.id }
+                    return lhs.updatedAt < rhs.updatedAt
+                }
+        }
+    }
+
+    public func failStewardBatch(id: String, error: String) throws {
+        try synchronized {
+            var state = try loadStateUnlocked()
+            guard let batch = state.stewardBatches?[id] else {
+                throw WorkstateStorageError.invalidState("Unknown Steward batch: \(id)")
+            }
+            var records = state.processingRecords ?? [:]
+            for segmentID in batch.segmentIDs {
+                var record = records[segmentID] ?? SegmentProcessingRecord(segmentID: segmentID)
+                record.stage = .failed
+                record.failedStage = .applying
+                record.error = error
+                record.updatedAt = Date()
+                records[segmentID] = record
+            }
+            state.processingRecords = records
+            try saveState(state)
         }
     }
 
@@ -750,12 +1257,20 @@ public struct CodexSessionScanner: Sendable {
     public func recentSegments(threadID: String, before timestamp: Date, limit: Int = 3) throws -> [SessionSegment] {
         try synchronized {
             guard limit > 0 else { return [] }
-            let locations = Array(try evidenceLocationIndex().values
-                .filter { $0.threadID == threadID && $0.timestamp < timestamp }
-                .sorted { $0.timestamp > $1.timestamp }
-                .prefix(limit)
-                .reversed())
-            return try locations.map(readEvidence)
+            let records = try sourceIndex().recentPointers(
+                provider: "codex",
+                threadID: threadID,
+                before: timestamp,
+                limit: limit
+            )
+            return records.compactMap { record in
+                do {
+                    return try materialize(record.pointer)
+                } catch {
+                    storage.diagnostics.recentContextFailures += 1
+                    return nil
+                }
+            }
         }
     }
 
@@ -766,16 +1281,188 @@ public struct CodexSessionScanner: Sendable {
         }
     }
 
+    public func pendingIndexedSegments(limit: Int = 50) throws -> [SessionSegment] {
+        try synchronized {
+            guard limit > 0 else { return [] }
+            return try sourceIndex().pendingPointers(limit: limit).map {
+                try materialize($0.pointer)
+            }
+        }
+    }
+
+    public func routeBindingHistory() throws -> [String: [ThreadRouteBinding]] {
+        try synchronized {
+            let state = try loadState()
+            var history = state.routeBindingHistory ?? [:]
+            for (threadID, binding) in state.routeBindings ?? [:]
+            where history[threadID]?.isEmpty != false {
+                history[threadID] = [binding]
+            }
+            return history
+        }
+    }
+
+    public func openSemanticBundles() throws -> [OpenSemanticBundle] {
+        try synchronized {
+            let indexed = try sourceIndex().semanticBundles(limit: 100).map { bundle in
+                OpenSemanticBundle(
+                    id: bundle.id,
+                    threadID: bundle.threadID,
+                    projectID: bundle.projectID,
+                    disposition: "carry",
+                    title: bundle.title,
+                    summary: bundle.summary,
+                    evidenceIDs: bundle.pointerIDs.map {
+                        "\($0.threadID):\($0.turnID)"
+                    },
+                    updatedAt: bundle.updatedAt
+                )
+            }
+            let state = try loadStateUnlocked()
+            let records = state.processingRecords ?? [:]
+            let routedIDs = state.pendingSegmentIDs.filter { segmentID in
+                guard let route = records[segmentID]?.route else { return false }
+                return route.normalizedDisposition != "ignore"
+                    && !(route.bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            guard !routedIDs.isEmpty else { return indexed }
+            let segments = try loadPendingSegments(ids: routedIDs)
+            let segmentByID = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0) })
+            let grouped = Dictionary(grouping: routedIDs) { records[$0]!.route!.bundleId! }
+            let legacy: [OpenSemanticBundle] = grouped.compactMap { element in
+                let (bundleID, evidenceIDs) = element
+                let orderedIDs = evidenceIDs.sorted {
+                    guard let lhs = segmentByID[$0], let rhs = segmentByID[$1] else { return $0 < $1 }
+                    return lhs.timestamp < rhs.timestamp
+                }
+                guard let latestID = orderedIDs.max(by: {
+                    (records[$0]?.updatedAt ?? .distantPast) < (records[$1]?.updatedAt ?? .distantPast)
+                }), let latestRoute = records[latestID]?.route,
+                      let latestSegment = segmentByID[latestID] else {
+                    return nil
+                }
+                return OpenSemanticBundle(
+                    id: bundleID,
+                    threadID: latestSegment.threadID,
+                    projectID: latestRoute.projectId,
+                    disposition: latestRoute.normalizedDisposition,
+                    title: latestRoute.bundleTitle ?? "",
+                    summary: latestRoute.bundleSummary ?? "",
+                    evidenceIDs: orderedIDs,
+                    updatedAt: records[latestID]?.updatedAt ?? latestSegment.timestamp
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt == rhs.updatedAt { return lhs.id < rhs.id }
+                return lhs.updatedAt < rhs.updatedAt
+            }
+            var byID = Dictionary(uniqueKeysWithValues: legacy.map { ($0.id, $0) })
+            for bundle in indexed { byID[bundle.id] = bundle }
+            return byID.values.sorted { lhs, rhs in
+                if lhs.updatedAt == rhs.updatedAt { return lhs.id < rhs.id }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+        }
+    }
+
+    public func indexedSemanticBundles() throws -> [ConversationSemanticBundle] {
+        try synchronized {
+            try sourceIndex().semanticBundles(limit: 100)
+        }
+    }
+
+    public func segments(ids: [String]) throws -> [SessionSegment] {
+        try synchronized {
+            try loadPendingSegments(ids: ids)
+        }
+    }
+
+    public func segments(
+        pointerRecords: [ConversationSourcePointerRecord]
+    ) throws -> [SessionSegment] {
+        try synchronized {
+            try pointerRecords.map { try materialize($0.pointer) }
+                .sorted { $0.timestamp < $1.timestamp }
+        }
+    }
+
+    public func segment(
+        pointerRecord: ConversationSourcePointerRecord
+    ) throws -> SessionSegment {
+        try synchronized {
+            try materialize(
+                pointerRecord.pointer,
+                repairsPendingLegacyHash: pointerRecord.processingState == .pending
+            )
+        }
+    }
+
+    public func pointerRecords(
+        ids: [ConversationSourcePointerID]
+    ) throws -> [ConversationSourcePointerRecord] {
+        try synchronized {
+            try sourceIndex().pointers(ids: ids)
+        }
+    }
+
+    public func resolveMessages(for source: SourceReference) throws -> [ConversationMessage] {
+        try synchronized {
+            if !source.excerpt.isEmpty { return source.excerpt }
+            guard source.kind == "conversation",
+                  !source.threadID.isEmpty,
+                  !source.turnIDs.isEmpty else { return [] }
+            let index = try sourceIndex()
+            var messages: [ConversationMessage] = []
+            for turnID in source.turnIDs {
+                let id = ConversationSourcePointerID(
+                    provider: source.provider ?? "codex",
+                    threadID: source.threadID,
+                    turnID: turnID
+                )
+                let pointer: ConversationSourcePointer
+                if let record = try index.pointer(id: id) {
+                    pointer = record.pointer
+                } else if source.turnIDs.count == 1,
+                          let startOffset = source.startOffset,
+                          let endOffset = source.endOffset,
+                          !source.locator.isEmpty,
+                          !source.contentHash.isEmpty {
+                    pointer = ConversationSourcePointer(
+                        provider: source.provider ?? "codex",
+                        threadID: source.threadID,
+                        turnID: turnID,
+                        sourcePath: source.locator,
+                        startOffset: startOffset,
+                        endOffset: endOffset,
+                        timestamp: .distantPast,
+                        cwd: "",
+                        contentHash: source.contentHash,
+                        messageSpans: source.messageSpans ?? []
+                    )
+                } else {
+                    throw WorkstateStorageError.invalidState(
+                        "Conversation source pointer is missing: \(source.threadID)/\(turnID)"
+                    )
+                }
+                let segment = try materialize(pointer)
+                messages.append(
+                    ConversationMessage(role: "user", text: segment.userText, timestamp: segment.timestamp)
+                )
+                messages.append(
+                    ConversationMessage(role: "assistant", text: segment.assistantText, timestamp: segment.timestamp)
+                )
+            }
+            return messages
+        }
+    }
+
     @discardableResult
     public func discardUnprocessed(before cutoff: Date) throws -> Int {
         try synchronized {
             var state = try loadStateUnlocked()
-            let pendingIDs = Set(state.pendingSegmentIDs)
-            guard !pendingIDs.isEmpty else { return 0 }
-
-            let segments = try loadPendingSegments(ids: state.pendingSegmentIDs)
-            let discardedIDs = Set(segments.compactMap { segment -> String? in
-                effectiveTimestamp(for: segment) < cutoff ? segment.id : nil
+            let discardedPointers = try sourceIndex().deletePendingPointers(before: cutoff)
+            let discardedIDs = Set(discardedPointers.map {
+                "\($0.threadID):\($0.turnID)"
             })
             guard !discardedIDs.isEmpty else { return 0 }
 
@@ -786,9 +1473,8 @@ public struct CodexSessionScanner: Sendable {
                 }
                 state.processingRecords = records
             }
-            try rewriteEvidence(excluding: discardedIDs)
             try saveState(state)
-            return discardedIDs.count
+            return discardedPointers.count
         }
     }
 
@@ -802,11 +1488,15 @@ public struct CodexSessionScanner: Sendable {
             return state.cursors.compactMap { sourcePath, cursor in
                 let fileUpdatedAt = (try? FileManager.default.attributesOfItem(atPath: sourcePath)[.modificationDate]) as? Date
                 let updatedAt = cursor.lastActivityAt ?? fileUpdatedAt
+                let userText = (try? readUserText(
+                    sourcePath: sourcePath,
+                    spans: cursor.sourceSpans ?? []
+                )) ?? ""
                 guard !cursor.threadID.isEmpty,
                       !excluded.contains(cursor.threadID),
                       !isWorkstateAgentCWD(cursor.cwd),
                       !cursor.activeTurnID.isEmpty,
-                      !cursor.userText.isEmpty,
+                      !userText.isEmpty,
                       let updatedAt,
                       now.timeIntervalSince(updatedAt) <= maximumAge else {
                     return nil
@@ -815,7 +1505,7 @@ public struct CodexSessionScanner: Sendable {
                     threadID: cursor.threadID,
                     turnID: cursor.activeTurnID,
                     cwd: cursor.cwd,
-                    userText: cursor.userText,
+                    userText: userText,
                     updatedAt: updatedAt
                 )
             }
@@ -862,7 +1552,13 @@ public struct CodexSessionScanner: Sendable {
         cursor.isInternalAgentSession = metadata.isInternalAgentSession
         cursor.offset = fileSize
 
-        let tailSize = min(fileSize, 8 * 1024 * 1024)
+        let modifiedAt = try file.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate ?? .distantPast
+        guard Date().timeIntervalSince(modifiedAt) <= 30 * 60 else {
+            return cursor
+        }
+        let tailSize = min(fileSize, 256 * 1024)
         guard tailSize > 0 else { return cursor }
         let tailStart = fileSize - tailSize
         let handle = try FileHandle(forReadingFrom: file)
@@ -871,7 +1567,7 @@ public struct CodexSessionScanner: Sendable {
         let data = try handle.readToEnd() ?? Data()
         let lines = completeLines(in: data, dropsFirstPartialLine: tailStart > 0)
         for line in lines {
-            _ = apply(
+            _ = try apply(
                 line: line.data,
                 lineOffset: tailStart + UInt64(line.offset),
                 cursor: &cursor,
@@ -895,7 +1591,7 @@ public struct CodexSessionScanner: Sendable {
             startingAt: cursor.offset,
             markers: Self.ingestionLineMarkers
         ) { line in
-            if let segment = apply(
+            if let segment = try apply(
                 line: line.data,
                 lineOffset: line.offset,
                 cursor: &updated,
@@ -919,7 +1615,7 @@ public struct CodexSessionScanner: Sendable {
             chunkSize: chunkSize,
             markers: Self.ingestionLineMarkers
         ) { line in
-            if let segment = apply(
+            if let segment = try apply(
                 line: line.data,
                 lineOffset: line.offset,
                 cursor: &cursor,
@@ -946,7 +1642,7 @@ public struct CodexSessionScanner: Sendable {
             chunkSize: chunkSize,
             markers: Self.ingestionLineMarkers
         ) { line in
-            guard let segment = apply(
+            guard let segment = try apply(
                 line: line.data,
                 lineOffset: line.offset,
                 cursor: &cursor,
@@ -976,6 +1672,7 @@ public struct CodexSessionScanner: Sendable {
     private func streamRelevantLines(
         in file: URL,
         startingAt startOffset: UInt64 = 0,
+        endingAt endOffset: UInt64? = nil,
         chunkSize: Int = 1024 * 1024,
         prefixInspectionLimit: Int = 256 * 1024,
         maximumRelevantLineBytes: Int = 64 * 1024 * 1024,
@@ -993,7 +1690,10 @@ public struct CodexSessionScanner: Sendable {
         var discardingLine = false
 
         while true {
-            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
+            if let endOffset, readOffset >= endOffset { break }
+            let remaining = endOffset.map { Int(min(UInt64(chunkSize), $0 - readOffset)) }
+                ?? chunkSize
+            let chunk = try handle.read(upToCount: remaining) ?? Data()
             if chunk.isEmpty { break }
             var fragmentStart = chunk.startIndex
 
@@ -1034,6 +1734,11 @@ public struct CodexSessionScanner: Sendable {
             }
             readOffset += UInt64(chunk.count)
         }
+        if let endOffset, completedOffset != endOffset {
+            throw WorkstateStorageError.invalidState(
+                "Conversation source range does not end on a complete JSONL record: \(file.path)"
+            )
+        }
         return completedOffset
     }
 
@@ -1046,7 +1751,7 @@ public struct CodexSessionScanner: Sendable {
         lineOffset: UInt64,
         cursor: inout SessionCursor,
         sourcePath: String
-    ) -> SessionSegment? {
+    ) throws -> SessionSegment? {
         guard let object = parseObject(line),
               let type = object["type"] as? String,
               let payload = object["payload"] as? [String: Any] else {
@@ -1072,41 +1777,69 @@ public struct CodexSessionScanner: Sendable {
             cursor.activeTurnID = payload["turn_id"] as? String ?? ""
             cursor.activeTurnOffset = lineOffset
             cursor.userText = ""
+            cursor.sourceSpans = []
             cursor.lastActivityAt = eventTimestamp
         case "user_message":
             let message = (payload["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !message.isEmpty {
                 cursor.userText = cursor.userText.isEmpty ? message : "\(cursor.userText)\n\n\(message)"
+                cursor.sourceSpans = (cursor.sourceSpans ?? []) + [
+                    ConversationSourceSpan(
+                        kind: .userMessage,
+                        startOffset: lineOffset,
+                        endOffset: lineOffset + UInt64(line.count) + 1
+                    )
+                ]
             }
             cursor.lastActivityAt = eventTimestamp
         case "task_complete":
             let turnID = payload["turn_id"] as? String ?? cursor.activeTurnID
             let assistantText = (payload["last_agent_message"] as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            var userSpans = cursor.sourceSpans ?? []
+            if userSpans.isEmpty, !cursor.userText.isEmpty {
+                userSpans = try recoverLegacyUserSpans(
+                    sourcePath: sourcePath,
+                    startOffset: cursor.activeTurnOffset,
+                    endOffset: lineOffset,
+                    expectedUserText: cursor.userText
+                )
+            }
+            let userText = userSpans.isEmpty
+                ? cursor.userText
+                : try readUserText(sourcePath: sourcePath, spans: userSpans)
+            let turnStartOffset = cursor.activeTurnOffset
+            cursor.activeTurnID = ""
+            cursor.activeTurnOffset = 0
+            cursor.userText = ""
+            cursor.sourceSpans = nil
+            cursor.lastActivityAt = nil
             guard !cursor.threadID.isEmpty,
                   !turnID.isEmpty,
-                  !cursor.userText.isEmpty,
+                  !userText.isEmpty,
                   !assistantText.isEmpty else {
                 return nil
             }
             let timestamp = Self.timestamp(fromTimeOrderedID: turnID)
                 ?? parseTimestamp(object["timestamp"] as? String)
                 ?? Date()
+            let completionSpan = ConversationSourceSpan(
+                kind: .assistantCompletion,
+                startOffset: lineOffset,
+                endOffset: lineOffset + UInt64(line.count) + 1
+            )
             let segment = SessionSegment(
                 threadID: cursor.threadID,
                 turnID: turnID,
                 sourcePath: sourcePath,
-                startOffset: cursor.activeTurnOffset,
+                startOffset: turnStartOffset,
                 endOffset: lineOffset + UInt64(line.count) + 1,
                 cwd: cursor.cwd,
-                userText: cursor.userText,
+                userText: userText,
                 assistantText: assistantText,
-                timestamp: timestamp
+                timestamp: timestamp,
+                sourceSpans: userSpans + [completionSpan]
             )
-            cursor.activeTurnID = ""
-            cursor.activeTurnOffset = 0
-            cursor.userText = ""
-            cursor.lastActivityAt = nil
             return segment
         default:
             break
@@ -1114,57 +1847,289 @@ public struct CodexSessionScanner: Sendable {
         return nil
     }
 
-    private func appendEvidence(_ segments: [SessionSegment]) throws {
-        if !FileManager.default.fileExists(atPath: evidenceURL.path) {
-            FileManager.default.createFile(atPath: evidenceURL.path, contents: nil)
+    private func recoverLegacyUserSpans(
+        sourcePath: String,
+        startOffset: UInt64,
+        endOffset: UInt64,
+        expectedUserText: String,
+        maximumBytes: UInt64 = 8 * 1024 * 1024
+    ) throws -> [ConversationSourceSpan] {
+        guard endOffset > startOffset else {
+            throw WorkstateStorageError.invalidState(
+                "Legacy active turn has no readable source range: \(sourcePath)"
+            )
         }
-        let handle = try FileHandle(forWritingTo: evidenceURL)
+        let sourceURL = canonicalFileURL(URL(fileURLWithPath: sourcePath))
+        let length = min(endOffset - startOffset, maximumBytes)
+        let handle = try FileHandle(forReadingFrom: sourceURL)
         defer { try? handle.close() }
-        var offset = try handle.seekToEnd()
-        for segment in segments {
-            var data = try WorkstateCoding.makeEncoder(pretty: false).encode(segment)
-            data.append(0x0A)
-            try handle.write(contentsOf: data)
-            if storage.evidenceLocations != nil {
-                storage.evidenceLocations?[segment.id] = EvidenceLocation(
-                    offset: offset,
-                    length: data.count,
-                    threadID: segment.threadID,
-                    timestamp: segment.timestamp
-                )
-            }
-            offset += UInt64(data.count)
+        try handle.seek(toOffset: startOffset)
+        guard let data = try handle.read(upToCount: Int(length)), !data.isEmpty else {
+            throw WorkstateStorageError.invalidState(
+                "Legacy active turn source cannot be read: \(sourceURL.path)"
+            )
         }
+
+        var messages: [String] = []
+        var spans: [ConversationSourceSpan] = []
+        for line in completeLines(in: data, dropsFirstPartialLine: false) {
+            guard let object = parseObject(line.data),
+                  object["type"] as? String == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "user_message" else {
+                continue
+            }
+            let message = (payload["message"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !message.isEmpty else { continue }
+            messages.append(message)
+            let lineStart = startOffset + UInt64(line.offset)
+            spans.append(
+                ConversationSourceSpan(
+                    kind: .userMessage,
+                    startOffset: lineStart,
+                    endOffset: lineStart + UInt64(line.length)
+                )
+            )
+            if messages.joined(separator: "\n\n") == expectedUserText {
+                return spans
+            }
+        }
+        throw WorkstateStorageError.invalidState(
+            "Legacy active turn user message could not be located within 8 MiB: \(sourceURL.path)"
+        )
     }
 
-    private func rewriteEvidence(excluding excludedIDs: Set<String>) throws {
-        guard !excludedIDs.isEmpty,
-              FileManager.default.fileExists(atPath: evidenceURL.path) else {
-            return
+    private func sourceIndex() throws -> ConversationSourceIndex {
+        if let index = storage.sourceIndex { return index }
+        let index = try ConversationSourceIndex(databaseURL: sourceIndexURL)
+        storage.sourceIndex = index
+        return index
+    }
+
+    private func sourcePointerID(for segment: SessionSegment) -> ConversationSourcePointerID {
+        ConversationSourcePointerID(
+            provider: "codex",
+            threadID: segment.threadID,
+            turnID: segment.turnID
+        )
+    }
+
+    private func sourcePointerID(forSegmentID id: String) throws -> ConversationSourcePointerID {
+        let parts = id.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+            throw WorkstateStorageError.invalidState("Invalid conversation source id: \(id)")
         }
-        let temporaryURL = evidenceURL
-            .deletingLastPathComponent()
-            .appendingPathComponent(".\(evidenceURL.lastPathComponent).\(UUID().uuidString).tmp")
-        FileManager.default.createFile(atPath: temporaryURL.path, contents: nil)
-        let output = try FileHandle(forWritingTo: temporaryURL)
-        do {
-            _ = try streamRelevantLines(in: evidenceURL, markers: []) { line in
-                let segment = try WorkstateCoding.makeDecoder().decode(
-                    SessionSegment.self,
-                    from: line.data
+        return ConversationSourcePointerID(
+            provider: "codex",
+            threadID: String(parts[0]),
+            turnID: String(parts[1])
+        )
+    }
+
+    private func storeSourcePointers(
+        _ segments: [SessionSegment],
+        in index: ConversationSourceIndex
+    ) throws {
+        guard !segments.isEmpty else { return }
+        try index.upsertPointers(segments.map { segment in
+            ConversationSourcePointer(
+                provider: "codex",
+                threadID: segment.threadID,
+                turnID: segment.turnID,
+                sourcePath: canonicalFileURL(URL(fileURLWithPath: segment.sourcePath)).path,
+                startOffset: segment.startOffset,
+                endOffset: segment.endOffset,
+                timestamp: segment.timestamp,
+                cwd: segment.cwd,
+                contentHash: contentHash(
+                    userText: segment.userText,
+                    assistantText: segment.assistantText
+                ),
+                messageSpans: segment.sourceSpans ?? []
+            )
+        })
+    }
+
+    private func materialize(
+        _ pointer: ConversationSourcePointer,
+        repairsPendingLegacyHash: Bool = false
+    ) throws -> SessionSegment {
+        let messages = pointer.messageSpans.isEmpty
+            ? try readMessagesInTurn(pointer)
+            : try readMessages(sourcePath: pointer.sourcePath, spans: pointer.messageSpans)
+        let userText = messages.user.joined(separator: "\n\n")
+        guard !userText.isEmpty,
+              !messages.assistant.isEmpty,
+              messages.completionTurnID == pointer.turnID else {
+            throw WorkstateStorageError.invalidState(
+                "Conversation source no longer contains the indexed turn: \(pointer.threadID)/\(pointer.turnID)"
+            )
+        }
+        let resolvedHash = contentHash(userText: userText, assistantText: messages.assistant)
+        if resolvedHash != pointer.contentHash {
+            guard repairsPendingLegacyHash,
+                  legacySuffixHashMatches(
+                    pointer.contentHash,
+                    userMessages: messages.user,
+                    assistantText: messages.assistant
+                  ) else {
+                throw WorkstateStorageError.invalidState(
+                    "Conversation source changed after indexing: \(pointer.threadID)/\(pointer.turnID)"
                 )
-                guard !excludedIDs.contains(segment.id) else { return }
-                try output.write(contentsOf: line.data)
-                try output.write(contentsOf: Data([0x0A]))
             }
-            try output.close()
-            _ = try FileManager.default.replaceItemAt(evidenceURL, withItemAt: temporaryURL)
-            storage.evidenceLocations = nil
-        } catch {
-            try? output.close()
-            try? FileManager.default.removeItem(at: temporaryURL)
-            throw error
+            var repaired = pointer
+            repaired.contentHash = resolvedHash
+            try sourceIndex().upsertPointer(repaired)
+            storage.diagnostics.repairedLegacyPointerHashes += 1
         }
+        return SessionSegment(
+            threadID: pointer.threadID,
+            turnID: pointer.turnID,
+            sourcePath: pointer.sourcePath,
+            startOffset: pointer.startOffset,
+            endOffset: pointer.endOffset,
+            cwd: pointer.cwd,
+            userText: userText,
+            assistantText: messages.assistant,
+            timestamp: pointer.timestamp,
+            sourceSpans: pointer.messageSpans
+        )
+    }
+
+    private func readUserText(
+        sourcePath: String,
+        spans: [ConversationSourceSpan]
+    ) throws -> String {
+        let userSpans = spans.filter { $0.kind == .userMessage }
+        guard !userSpans.isEmpty else { return "" }
+        return try readMessages(sourcePath: sourcePath, spans: userSpans)
+            .user
+            .joined(separator: "\n\n")
+    }
+
+    private func readMessages(
+        sourcePath: String,
+        spans: [ConversationSourceSpan]
+    ) throws -> ResolvedConversationMessages {
+        let sourceURL = canonicalFileURL(URL(fileURLWithPath: sourcePath))
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            throw WorkstateStorageError.invalidState("Conversation source is missing: \(sourceURL.path)")
+        }
+        var userMessages: [String] = []
+        var assistant = ""
+        var completionTurnID = ""
+        for span in spans {
+            let line = try readSourceSpan(span, from: sourceURL)
+            guard let object = parseObject(line),
+                  object["type"] as? String == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  let eventType = payload["type"] as? String else {
+                throw WorkstateStorageError.invalidState(
+                    "Conversation pointer does not reference an event message: \(sourceURL.path)"
+                )
+            }
+            switch (span.kind, eventType) {
+            case (.userMessage, "user_message"):
+                let value = (payload["message"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { userMessages.append(value) }
+            case (.assistantCompletion, "task_complete"):
+                assistant = (payload["last_agent_message"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                completionTurnID = payload["turn_id"] as? String ?? ""
+            default:
+                throw WorkstateStorageError.invalidState(
+                    "Conversation pointer kind does not match its source event: \(sourceURL.path)"
+                )
+            }
+        }
+        return ResolvedConversationMessages(
+            user: userMessages,
+            assistant: assistant,
+            completionTurnID: completionTurnID
+        )
+    }
+
+    private func readMessagesInTurn(
+        _ pointer: ConversationSourcePointer
+    ) throws -> ResolvedConversationMessages {
+        let sourceURL = canonicalFileURL(URL(fileURLWithPath: pointer.sourcePath))
+        var userMessages: [String] = []
+        var assistant = ""
+        var completionTurnID = ""
+        _ = try streamRelevantLines(
+            in: sourceURL,
+            startingAt: pointer.startOffset,
+            endingAt: pointer.endOffset,
+            markers: [Data("\"event_msg\"".utf8)]
+        ) { line in
+            guard let object = parseObject(line.data),
+                  let payload = object["payload"] as? [String: Any],
+                  let eventType = payload["type"] as? String else { return }
+            if eventType == "user_message" {
+                let value = (payload["message"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { userMessages.append(value) }
+            } else if eventType == "task_complete",
+                      payload["turn_id"] as? String == pointer.turnID {
+                assistant = (payload["last_agent_message"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                completionTurnID = pointer.turnID
+            }
+        }
+        return ResolvedConversationMessages(
+            user: userMessages,
+            assistant: assistant,
+            completionTurnID: completionTurnID
+        )
+    }
+
+    private func readSourceSpan(
+        _ span: ConversationSourceSpan,
+        from sourceURL: URL,
+        maximumBytes: UInt64 = 8 * 1024 * 1024
+    ) throws -> Data {
+        guard span.endOffset > span.startOffset else {
+            throw WorkstateStorageError.invalidState("Conversation source span is empty")
+        }
+        let length = span.endOffset - span.startOffset
+        guard length <= maximumBytes else {
+            throw WorkstateStorageError.invalidState(
+                "Conversation source message exceeds 8 MiB: \(sourceURL.path)"
+            )
+        }
+        let handle = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: span.startOffset)
+        guard var data = try handle.read(upToCount: Int(length)), data.count == Int(length) else {
+            throw WorkstateStorageError.invalidState(
+                "Conversation source ended before its indexed span: \(sourceURL.path)"
+            )
+        }
+        storage.diagnostics.sourceResolutionBytesRead += UInt64(data.count)
+        if data.last == 0x0A { data.removeLast() }
+        return data
+    }
+
+    private func contentHash(userText: String, assistantText: String) -> String {
+        let digest = SHA256.hash(data: Data("\(userText)\u{0}\(assistantText)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func legacySuffixHashMatches(
+        _ storedHash: String,
+        userMessages: [String],
+        assistantText: String
+    ) -> Bool {
+        guard userMessages.count > 1 else { return false }
+        for start in 1..<userMessages.count {
+            let suffix = userMessages[start...].joined(separator: "\n\n")
+            if contentHash(userText: suffix, assistantText: assistantText) == storedHash {
+                return true
+            }
+        }
+        return false
     }
 
     private func effectiveTimestamp(for segment: SessionSegment) -> Date {
@@ -1173,71 +2138,130 @@ public struct CodexSessionScanner: Sendable {
 
     private func loadPendingSegments(ids: [String]) throws -> [SessionSegment] {
         guard !ids.isEmpty else { return [] }
-        let index = try evidenceLocationIndex()
-        return try ids.compactMap { index[$0] }
-            .map(readEvidence)
+        let index = try sourceIndex()
+        let pointerIDs = try ids.map(sourcePointerID(forSegmentID:))
+        let records = try index.pointers(ids: pointerIDs)
+        let byID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0.pointer) })
+        return try pointerIDs.compactMap { byID[$0] }
+            .map { try materialize($0) }
             .sorted { $0.timestamp < $1.timestamp }
     }
 
-    private func evidenceLocationIndex() throws -> [String: EvidenceLocation] {
-        if let cached = storage.evidenceLocations { return cached }
-        storage.diagnostics.evidenceIndexLoads += 1
-        guard FileManager.default.fileExists(atPath: evidenceURL.path) else {
-            storage.evidenceLocations = [:]
-            return [:]
+    private func saveState(_ state: IngestionSnapshot) throws {
+        let needsLegacyCursorRewrite = storage.persistAllCursors
+        var cached = state
+        let pending = Set(cached.pendingSegmentIDs)
+        if var records = cached.processingRecords {
+            records = records.filter { pending.contains($0.key) }
+            cached.processingRecords = records
         }
-        var index: [String: EvidenceLocation] = [:]
-        _ = try streamRelevantLines(in: evidenceURL, markers: []) { line in
-            let segment = try WorkstateCoding.makeDecoder().decode(
-                SessionSegment.self,
-                from: line.data
-            )
-            index[segment.id] = EvidenceLocation(
-                offset: line.offset,
-                length: line.length,
-                threadID: segment.threadID,
-                timestamp: segment.timestamp
-            )
+        if var batches = cached.stewardBatches {
+            batches = batches.filter { _, batch in
+                !Set(batch.segmentIDs).isDisjoint(with: pending)
+            }
+            cached.stewardBatches = batches
         }
-        storage.evidenceLocations = index
-        return index
+        cached.cursors = cached.cursors.filter {
+            $0.value.isInternalAgentSession != true
+        }
+        for path in cached.cursors.keys {
+            cached.cursors[path]?.userText = ""
+        }
+        cached.excludedThreadIDs = Array(Set(cached.excludedThreadIDs)).sorted()
+
+        let previousCursors = storage.state?.cursors ?? [:]
+        if previousCursors != cached.cursors {
+            storage.cursorsDirty = true
+        }
+        if storage.cursorsDirty {
+            let index = try sourceIndex()
+            let changedCursors = cached.cursors.filter { path, cursor in
+                storage.persistAllCursors || previousCursors[path] != cursor
+            }
+            let currentPaths = Set(cached.cursors.keys)
+            try index.deleteScanCursors(
+                provider: "codex",
+                sourcePaths: Array(Set(previousCursors.keys).subtracting(currentPaths))
+            )
+            try index.upsertScanCursors(changedCursors.map { path, cursor in
+                ConversationScanCursor(
+                    provider: "codex",
+                    sourcePath: path,
+                    nextOffset: cursor.offset,
+                    threadID: cursor.threadID,
+                    cwd: cursor.cwd,
+                    activeTurnID: cursor.activeTurnID,
+                    activeTurnOffset: cursor.activeTurnOffset,
+                    messageSpans: cursor.sourceSpans ?? [],
+                    lastActivityAt: cursor.lastActivityAt,
+                    isInternalAgentSession: cursor.isInternalAgentSession
+                )
+            })
+            storage.cursorsDirty = false
+            storage.persistAllCursors = false
+        }
+
+        var persisted = cached
+        persisted.cursors = [:]
+        var previousPersisted = storage.state
+        previousPersisted?.cursors = [:]
+        if !needsLegacyCursorRewrite,
+           previousPersisted == persisted,
+           FileManager.default.fileExists(atPath: stateURL.path) {
+            storage.state = cached
+            return
+        }
+        let data = try WorkstateCoding.makeEncoder().encode(persisted)
+        try data.write(to: stateURL, options: .atomic)
+        storage.state = cached
     }
 
-    private func readEvidence(at location: EvidenceLocation) throws -> SessionSegment {
-        let handle = try FileHandle(forReadingFrom: evidenceURL)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: location.offset)
-        var data = Data()
-        while data.count < location.length {
-            let chunk = try handle.read(upToCount: location.length - data.count) ?? Data()
-            guard !chunk.isEmpty else {
+    private func validateCompleteBatchCommit(
+        _ processed: Set<String>,
+        in state: IngestionSnapshot
+    ) throws {
+        for batch in (state.stewardBatches ?? [:]).values {
+            let batchSegments = Set(batch.segmentIDs)
+            guard batchSegments.isDisjoint(with: processed)
+                    || batchSegments.isSubset(of: processed) else {
                 throw WorkstateStorageError.invalidState(
-                    "Evidence ended before its indexed length at \(location.offset)"
+                    "A persisted Steward batch must be committed as one unit: \(batch.id)"
                 )
             }
-            data.append(chunk)
         }
-        if data.last == 0x0A { data.removeLast() }
-        return try WorkstateCoding.makeDecoder().decode(SessionSegment.self, from: data)
-    }
-
-    private func saveState(_ state: IngestionSnapshot) throws {
-        let data = try WorkstateCoding.makeEncoder().encode(state)
-        try data.write(to: stateURL, options: .atomic)
-        storage.state = state
     }
 
     private func loadStateUnlocked() throws -> IngestionSnapshot {
         if let cached = storage.state { return cached }
-        guard FileManager.default.fileExists(atPath: stateURL.path) else {
-            let empty = IngestionSnapshot()
-            storage.state = empty
-            return empty
+        var state = if FileManager.default.fileExists(atPath: stateURL.path) {
+            try WorkstateCoding.makeDecoder().decode(
+                IngestionSnapshot.self,
+                from: Data(contentsOf: stateURL)
+            )
+        } else {
+            IngestionSnapshot()
         }
-        let state = try WorkstateCoding.makeDecoder().decode(
-            IngestionSnapshot.self,
-            from: Data(contentsOf: stateURL)
-        )
+        let indexedCursors = try sourceIndex().scanCursors(provider: "codex")
+        if !indexedCursors.isEmpty {
+            state.cursors = Dictionary(uniqueKeysWithValues: indexedCursors.map { cursor in
+                (
+                    cursor.sourcePath,
+                    SessionCursor(
+                        offset: cursor.nextOffset,
+                        threadID: cursor.threadID,
+                        cwd: cursor.cwd,
+                        activeTurnID: cursor.activeTurnID,
+                        activeTurnOffset: cursor.activeTurnOffset,
+                        sourceSpans: cursor.messageSpans,
+                        lastActivityAt: cursor.lastActivityAt,
+                        isInternalAgentSession: cursor.isInternalAgentSession
+                    )
+                )
+            })
+        } else if !state.cursors.isEmpty {
+            storage.cursorsDirty = true
+            storage.persistAllCursors = true
+        }
         storage.state = state
         return state
     }

@@ -19,6 +19,7 @@ struct WorkstateDaemon {
         let briefComposer = BriefCompositionService(runtime: runtime, scanner: scanner)
         _ = try AutomationRecovery(service: service, scanner: scanner).run()
         _ = try scanner.recoverInterruptedProcessing()
+        _ = try scanner.requeueLegacyPendingRoutes()
 
         if runsOnce {
             try autoreleasepool {
@@ -97,7 +98,7 @@ struct WorkstateDaemon {
                     )
                 }
                 if DailyBriefScheduler.isDueToday() {
-                    try composePreviousDayBrief(
+                    try composePreviousActivityBrief(
                         composer: briefComposer,
                         orchestrator: orchestrator,
                         status: daemonStatus,
@@ -146,8 +147,9 @@ struct WorkstateDaemon {
                             workspace: service.snapshot()
                         )
                         if settings.setupCompleted && settings.liveMonitoringEnabled {
-                            try setPendingState(
-                                repository: daemonStatus,
+                            try processPending(
+                                orchestrator: orchestrator,
+                                status: daemonStatus,
                                 scanner: scanner
                             )
                         } else {
@@ -178,7 +180,7 @@ struct WorkstateDaemon {
                         }
                     }
                     if changes.consumeScheduledBrief() {
-                        try composePreviousDayBrief(
+                        try composePreviousActivityBrief(
                             composer: briefComposer,
                             orchestrator: orchestrator,
                             status: daemonStatus,
@@ -255,7 +257,12 @@ struct WorkstateDaemon {
             detail = "\(summary.failed) 条处理失败，已停止自动重试"
         } else {
             activity = .idle
-            detail = "已更新 \(summary.changed) 条 · 已忽略 \(summary.ignored) 条"
+            let carried = try scanner.openSemanticBundles().count
+            if carried > 0 {
+                detail = "已更新 \(summary.changed) 条 · \(carried) 条讨论等待收束"
+            } else {
+                detail = "已更新 \(summary.changed) 条 · 已忽略 \(summary.ignored) 条"
+            }
         }
         try setDaemonState(
             repository: status,
@@ -305,7 +312,7 @@ struct WorkstateDaemon {
         )
     }
 
-    private static func composePreviousDayBrief(
+    private static func composePreviousActivityBrief(
         composer: BriefCompositionService,
         orchestrator: WorkstateOrchestrator,
         status: DaemonStatusRepository,
@@ -315,9 +322,11 @@ struct WorkstateDaemon {
             repository: status,
             scanner: scanner,
             activity: .analyzing,
-            detail: "正在生成昨日工作总结"
+            detail: "正在生成最近工作日总结"
         )
-        _ = try composer.refreshPreviousDay(workspace: orchestrator.service.snapshot())
+        _ = try composer.refreshPreviousActivityDay(
+            workspace: orchestrator.service.snapshot()
+        )
         try setDaemonState(
             repository: status,
             scanner: scanner,
@@ -457,7 +466,7 @@ private final class PendingProcessingScheduler: @unchecked Sendable {
 
     init(
         changes: SessionChangeQueue,
-        quietInterval: TimeInterval = 5 * 60
+        quietInterval: TimeInterval = 20 * 60
     ) {
         self.changes = changes
         self.quietInterval = quietInterval

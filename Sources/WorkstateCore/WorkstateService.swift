@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ProjectCreateInput: Sendable {
+public struct ProjectCreateInput: Codable, Sendable {
     public var id: String
     public var name: String
     public var summary: String
@@ -56,22 +56,19 @@ public struct ProjectModelUpdate: Sendable {
     public var objectModel: [String]?
     public var acceptedDecisions: [DecisionRecord]?
     public var forbiddenDirections: [String]?
-    public var openIssues: [String]?
 
     public init(
         currentSummary: String? = nil,
         purpose: String? = nil,
         objectModel: [String]? = nil,
         acceptedDecisions: [DecisionRecord]? = nil,
-        forbiddenDirections: [String]? = nil,
-        openIssues: [String]? = nil
+        forbiddenDirections: [String]? = nil
     ) {
         self.currentSummary = currentSummary
         self.purpose = purpose
         self.objectModel = objectModel
         self.acceptedDecisions = acceptedDecisions
         self.forbiddenDirections = forbiddenDirections
-        self.openIssues = openIssues
     }
 }
 
@@ -625,10 +622,6 @@ public struct WorkstateService: Sendable {
                             snapshot.projects[projectIndex].tasks[taskIndex].status = .active
                         }
                     }
-                    for issue in proposal.openIssues
-                    where !snapshot.projects[projectIndex].context.openIssues.contains(issue) {
-                        snapshot.projects[projectIndex].context.openIssues.append(issue)
-                    }
                 }
                 switch review.kind {
                 case .understandingConflict where !review.proposedValue.isEmpty:
@@ -862,20 +855,6 @@ public struct WorkstateService: Sendable {
     }
 
     @discardableResult
-    public func appendOpenIssues(projectID: String, issues: [String]) throws -> WorkspaceSnapshot {
-        guard !issues.isEmpty else { return try repository.load() }
-        let mutation = WorkspaceMutation(kind: "context.open-issues", summary: projectID, projectID: projectID)
-        return try repository.update(mutation: mutation) { snapshot in
-            let index = try projectIndex(projectID, in: snapshot)
-            var existing = Set(snapshot.projects[index].context.openIssues)
-            for issue in issues where existing.insert(issue).inserted {
-                snapshot.projects[index].context.openIssues.append(issue)
-            }
-            touchProject(at: index, timestamp: mutation.timestamp, in: &snapshot)
-        }
-    }
-
-    @discardableResult
     public func addSource(_ source: SourceReference) throws -> WorkspaceSnapshot {
         let mutation = WorkspaceMutation(kind: "source.upsert", summary: source.label)
         return try repository.update(mutation: mutation) { snapshot in
@@ -960,9 +939,6 @@ public struct WorkstateService: Sendable {
             }
             if let forbiddenDirections = update.forbiddenDirections {
                 snapshot.projects[index].context.forbiddenDirections = forbiddenDirections
-            }
-            if let openIssues = update.openIssues {
-                snapshot.projects[index].context.openIssues = openIssues
             }
             touchProject(at: index, timestamp: mutation.timestamp, in: &snapshot)
         }

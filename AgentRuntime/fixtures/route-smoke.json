@@ -1,5 +1,9 @@
 {
   "mode": "route",
+  "profile": {
+    "model": "gpt-5.6-luna",
+    "reasoning": "low"
+  },
   "segment": {
     "id": "smoke:turn",
     "threadID": "smoke",
@@ -17,6 +21,7 @@
       "summary": "本地项目工作记忆工具",
       "purpose": "维护跨会话项目认知",
       "status": "active",
+      "focusedWorklineId": "",
       "activeWorklines": []
     },
     {
@@ -25,7 +30,11 @@
       "summary": "素材图谱与 Storyboard 前端实验",
       "purpose": "验证下一版 Reframe 交互",
       "status": "active",
+      "focusedWorklineId": "",
       "activeWorklines": []
     }
-  ]
+  ],
+  "priorRoute": null,
+  "recentTurns": [],
+  "openBundles": []
 }

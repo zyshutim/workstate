@@ -15,7 +15,7 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public var selectedReviewID: String?
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var liveActivities: [LiveProjectActivity] = []
-    @Published public private(set) var daemonStatus = DaemonSnapshot()
+    @Published public private(set) var runtimeStatus = RuntimeSnapshot()
     @Published public private(set) var ownerConversations: [String: ProjectOwnerConversation] = [:]
     @Published public private(set) var ownerChatSendingProjectIDs: Set<String> = []
     @Published public private(set) var globalConversation = GlobalConversation()
@@ -34,33 +34,35 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public private(set) var isSettingsPresented = false
     @Published public private(set) var modelCatalogError: String?
     @Published public private(set) var copiedHandoffProjectID: String?
+    @Published public private(set) var isManualSyncing = false
 
     public let repository: WorkstateRepository
     private let service: WorkstateService
-    private let liveActivityRepository: LiveActivityRepository
-    private let daemonStatusRepository: DaemonStatusRepository
+    private let runtimeStatusRepository: RuntimeStatusRepository
     private let ownerConversationRepository: ProjectOwnerConversationRepository
     private let ownerTurnRepository: ProjectOwnerTurnRepository
     private let globalConversationRepository: GlobalConversationRepository
     private let collaborationProfileRepository: CollaborationProfileRepository
     private let collaborationConversationRepository: CollaborationConversationRepository
+    private let durableMemoryRepository: DurableMemoryRepository
     private let dailyBriefRepository: DailyBriefRepository
     private let agentRuntime: AgentRuntimeClient
     private let settingsRepository: WorkstateSettingsRepository
     private let modelCatalog: CodexModelCatalog
     private var lastModificationDate: Date?
     private var lastSettingsModificationDate: Date?
+    private var conversationRuntime: AppHostedConversationRuntime?
 
     public init(repository: WorkstateRepository = .init()) {
         self.repository = repository
         service = WorkstateService(repository: repository)
-        liveActivityRepository = LiveActivityRepository(root: repository.paths.root)
-        daemonStatusRepository = DaemonStatusRepository(root: repository.paths.root)
+        runtimeStatusRepository = RuntimeStatusRepository(root: repository.paths.root)
         ownerConversationRepository = ProjectOwnerConversationRepository(root: repository.paths.root)
         ownerTurnRepository = ProjectOwnerTurnRepository(root: repository.paths.root)
         globalConversationRepository = GlobalConversationRepository(root: repository.paths.root)
         collaborationProfileRepository = CollaborationProfileRepository(root: repository.paths.root)
         collaborationConversationRepository = CollaborationConversationRepository(root: repository.paths.root)
+        durableMemoryRepository = DurableMemoryRepository(root: repository.paths.root)
         dailyBriefRepository = DailyBriefRepository(root: repository.paths.root)
         agentRuntime = AgentRuntimeClient(runtimeRoot: repository.paths.root)
         settingsRepository = WorkstateSettingsRepository(root: repository.paths.root)
@@ -76,8 +78,12 @@ public final class WorkstateViewModel: ObservableObject {
             needsOnboarding = !settings.setupCompleted
             lastModificationDate = repository.modificationDate()
             lastSettingsModificationDate = settingsModificationDate()
-            liveActivities = (try? liveActivityRepository.load().activities) ?? []
-            daemonStatus = (try? daemonStatusRepository.load()) ?? DaemonSnapshot()
+            if settings.liveMonitoringEnabled,
+               let restored = try? runtimeStatusRepository.load(),
+               restored.isFresh() {
+                runtimeStatus = restored
+                liveActivities = restored.liveActivities
+            }
             globalConversation = (try? globalConversationRepository.load()) ?? GlobalConversation()
             collaborationProfile = (try? collaborationProfileRepository.load()) ?? CollaborationProfile()
             collaborationConversation = (try? collaborationConversationRepository.load())
@@ -92,6 +98,7 @@ public final class WorkstateViewModel: ObservableObject {
             modelCatalogError = error.localizedDescription
         }
         refreshLatestActivityBrief()
+        configureConversationRuntime()
     }
 
     public var selectedProject: ProjectRecord? {
@@ -185,6 +192,7 @@ public final class WorkstateViewModel: ObservableObject {
             try settingsRepository.save(updated)
             settings = updated
             lastSettingsModificationDate = settingsModificationDate()
+            configureConversationRuntime()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -198,6 +206,7 @@ public final class WorkstateViewModel: ObservableObject {
             needsOnboarding = !settings.setupCompleted
             lastModificationDate = repository.modificationDate()
             lastSettingsModificationDate = settingsModificationDate()
+            configureConversationRuntime()
             errorMessage = nil
             refreshLatestActivityBrief()
         } catch {
@@ -359,7 +368,7 @@ public final class WorkstateViewModel: ObservableObject {
         let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty,
               !ownerChatSendingProjectIDs.contains(projectID),
-              let project = workspace.project(id: projectID) else {
+              workspace.project(id: projectID) != nil else {
             return
         }
 
@@ -390,17 +399,33 @@ public final class WorkstateViewModel: ObservableObject {
         }
 
         let runtime = agentRuntime
+        let contextRuntime = conversationRuntime ?? AppHostedConversationRuntime(
+            runtimeRoot: repository.paths.root
+        )
+        conversationRuntime = contextRuntime
         Task { [weak self] in
             do {
+                _ = try await contextRuntime.flush(
+                    trigger: .ownerContext,
+                    projectID: projectID
+                )
+                guard let self else { return }
+                self.reload(force: true)
+                guard let project = self.workspace.project(id: projectID) else {
+                    throw WorkstateStorageError.missingProject(projectID)
+                }
+                let openBundles = try CodexSessionScanner(
+                    runtimeRoot: self.repository.paths.root
+                ).openSemanticBundles()
                 let response = try await Task.detached(priority: .userInitiated) {
                     try runtime.ownerChat(
                         project: project,
                         history: Array(priorConversation.messages.suffix(16)),
                         message: message,
-                        activeTopicID: topicID
+                        activeTopicID: topicID,
+                        openBundles: openBundles
                     )
                 }.value
-                guard let self else { return }
                 let ownerMessage = ProjectOwnerMessage(role: .owner, text: response.reply, topicID: topicID)
                 try self.applyOwnerTopicUpdates(
                     response.topicUpdates,
@@ -516,11 +541,15 @@ public final class WorkstateViewModel: ObservableObject {
                             topicID: $0.topicID
                         )
                     }
+                let openBundles = try CodexSessionScanner(
+                    runtimeRoot: self.repository.paths.root
+                ).openSemanticBundles()
                 let response = try await Task.detached(priority: .userInitiated) {
                     try runtime.ownerChat(
                         project: project,
                         history: Array(projectHistory),
-                        message: message
+                        message: message,
+                        openBundles: openBundles
                     )
                 }.value
 
@@ -706,11 +735,57 @@ public final class WorkstateViewModel: ObservableObject {
     }
 
     public func copyHandoffPrompt(projectID: String) {
+        let runtime = conversationRuntime ?? AppHostedConversationRuntime(
+            runtimeRoot: repository.paths.root
+        )
+        conversationRuntime = runtime
+        runtime.flush(trigger: .handoff, projectID: projectID) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.reload(force: true)
+                    self.writeHandoffPrompt(projectID: projectID)
+                case .failure(let error):
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func writeHandoffPrompt(projectID: String) {
         do {
-            let snapshot = try service.contextSnapshot(
-                projectID: projectID,
-                collaborationGuidance: collaborationProfile.activeGuidance
+            let durableGuidance = try durableMemoryRepository.retrieve(
+                DurableMemorySelection(
+                    scopes: [DurableMemoryScope(kind: .project, identifier: projectID)]
+                )
             )
+            .flatMap(\.entries)
+            .filter { $0.lifecycle == .active || $0.lifecycle == .prohibited }
+            .map(\.text)
+            var snapshot = try service.contextSnapshot(
+                projectID: projectID,
+                collaborationGuidance: Array(
+                    Set(collaborationProfile.activeGuidance + durableGuidance)
+                )
+                .sorted()
+            )
+            snapshot.openSemanticBundles = try CodexSessionScanner(
+                runtimeRoot: repository.paths.root
+            ).openSemanticBundles()
+                .filter { $0.projectID == projectID }
+                .map {
+                    ContextSnapshotSemanticBundle(
+                        id: $0.id,
+                        title: $0.title,
+                        summary: $0.summary,
+                        threadID: $0.threadID,
+                        turnIDs: $0.evidenceIDs.compactMap { id in
+                            id.split(separator: ":", maxSplits: 1).last.map(String.init)
+                        },
+                        updatedAt: $0.updatedAt
+                    )
+                }
             let handoff = try ContextHandoffExporter(root: repository.paths.root).export(snapshot)
             NSPasteboard.general.clearContents()
             guard NSPasteboard.general.setString(handoff.prompt, forType: .string) else {
@@ -726,6 +801,28 @@ public final class WorkstateViewModel: ObservableObject {
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    public func syncNow() {
+        guard !isManualSyncing else { return }
+        isManualSyncing = true
+        let runtime = conversationRuntime ?? AppHostedConversationRuntime(
+            runtimeRoot: repository.paths.root
+        )
+        conversationRuntime = runtime
+        runtime.syncNow { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isManualSyncing = false
+                switch result {
+                case .success:
+                    self.reload(force: true)
+                    self.errorMessage = nil
+                case .failure(let error):
+                    self.errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -779,8 +876,7 @@ public final class WorkstateViewModel: ObservableObject {
     }
 
     public func reload(force: Bool = false) {
-        reloadLiveActivities()
-        reloadDaemonStatus()
+        reloadRuntimeStatus()
         reloadSettings()
         let modificationDate = repository.modificationDate()
         guard force || modificationDate != lastModificationDate else { return }
@@ -826,6 +922,34 @@ public final class WorkstateViewModel: ObservableObject {
             output.agentProfiles[role] = profile
         }
         return output
+    }
+
+    private func configureConversationRuntime() {
+        guard settings.setupCompleted, settings.liveMonitoringEnabled else {
+            conversationRuntime?.stop()
+            conversationRuntime = nil
+            runtimeStatus = RuntimeSnapshot(activity: .stopped, detail: "同步未运行")
+            liveActivities = []
+            return
+        }
+        if conversationRuntime == nil {
+            conversationRuntime = AppHostedConversationRuntime(
+                runtimeRoot: repository.paths.root,
+                minimumTimestamp: settings.liveMonitoringStartedAt,
+                snapshotObserver: { [weak self] snapshot in
+                    Task { @MainActor [weak self] in
+                        self?.applyRuntimeSnapshot(snapshot)
+                    }
+                }
+            )
+        }
+        do {
+            try conversationRuntime?.start()
+        } catch {
+            conversationRuntime?.stop()
+            conversationRuntime = nil
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func refreshLatestActivityBrief() {
@@ -914,19 +1038,19 @@ public final class WorkstateViewModel: ObservableObject {
         }
     }
 
-    private func reloadLiveActivities() {
-        guard let snapshot = try? liveActivityRepository.load(),
-              snapshot.activities != liveActivities else {
+    private func reloadRuntimeStatus() {
+        guard settings.liveMonitoringEnabled,
+              let snapshot = try? runtimeStatusRepository.load(),
+              snapshot.isFresh(),
+              snapshot != runtimeStatus else {
             return
         }
-        liveActivities = snapshot.activities
+        applyRuntimeSnapshot(snapshot)
     }
 
-    private func reloadDaemonStatus() {
-        guard let snapshot = try? daemonStatusRepository.load(), snapshot != daemonStatus else {
-            return
-        }
-        daemonStatus = snapshot
+    private func applyRuntimeSnapshot(_ snapshot: RuntimeSnapshot) {
+        runtimeStatus = snapshot
+        liveActivities = snapshot.liveActivities
     }
 
     private func loadOwnerConversation(projectID: String) {

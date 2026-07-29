@@ -25,7 +25,7 @@ public enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
 
     public var detail: String {
         switch self {
-        case .route: "判断一段工作属于哪个项目"
+        case .route: "筛选有效内容并分发到对应项目"
         case .steward: "维护项目理解、工作线和最新进展"
         case .distill: "把较长的历史记录整理成完整证据"
         case .rebuild: "从历史证据建立项目当前状态"
@@ -74,7 +74,7 @@ public struct WorkstateSettings: Codable, Equatable, Sendable {
     public init(
         schemaVersion: Int = 1,
         setupCompleted: Bool = false,
-        liveMonitoringEnabled: Bool = true,
+        liveMonitoringEnabled: Bool = false,
         liveMonitoringStartedAt: Date? = nil,
         agentProfiles: [AgentRole: AgentProfile] = WorkstateSettings.defaultProfiles
     ) {

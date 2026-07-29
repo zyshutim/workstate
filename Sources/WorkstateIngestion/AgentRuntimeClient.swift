@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import WorkstateCore
 
@@ -24,12 +25,28 @@ public struct AgentRuntimeClient: Sendable {
         if let explicit = ProcessInfo.processInfo.environment["WORKSTATE_AGENT_RUNTIME"] {
             return URL(fileURLWithPath: explicit)
         }
-        let candidates = [
+        var candidates: [URL] = []
+        if let resources = Bundle.main.resourceURL {
+            candidates.append(
+                resources.appendingPathComponent("AgentRuntime/dist/index.js")
+            )
+        }
+        if let executable = CommandLine.arguments.first, !executable.isEmpty {
+            let distributionRoot = URL(fileURLWithPath: executable)
+                .resolvingSymlinksInPath()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            candidates.append(
+                distributionRoot
+                    .appendingPathComponent("Workstate.app/Contents/Resources/AgentRuntime/dist/index.js")
+            )
+        }
+        candidates.append(contentsOf: [
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("AgentRuntime/dist/index.js"),
             FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/Workstate/AgentRuntime/dist/index.js")
-        ]
+        ])
         return candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) })
             ?? candidates[0]
     }
@@ -71,15 +88,64 @@ public struct AgentRuntimeClient: Sendable {
             mode: "route",
             profile: try runtimeProfile(.route),
             segment: segment,
-            projects: workspace.projects.map(PortfolioProjectPayload.init),
+            projects: workspace.projects.map(RoutingProjectPayload.init),
             priorRoute: try scanner.routeBinding(threadID: segment.threadID).map(RouteBindingPayload.init),
-            recentTurns: try scanner.recentSegments(threadID: segment.threadID, before: segment.timestamp)
+            recentTurns: try scanner.recentSegments(threadID: segment.threadID, before: segment.timestamp),
+            openBundles: try scanner.openSemanticBundles().map(OpenSemanticBundlePayload.init)
         )
         let envelope: RuntimeEnvelope<RouteResult> = try run(request, timeout: 300)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         try appendRun(envelope, segmentID: segment.id)
-        try appendDecision(envelope, segmentID: segment.id)
+        try validateRouteResult(envelope.result)
+        if envelope.result.action == "new_project",
+           workspace.project(id: envelope.result.projectId) != nil {
+            throw WorkstateStorageError.invalidState(
+                "Router tried to recreate an existing project: \(envelope.result.projectId)"
+            )
+        }
         return envelope.result
+    }
+
+    private func validateRouteResult(_ result: RouteResult) throws {
+        let supportedActions = ["continue_previous", "select_project", "switch_project", "new_project", "ignore"]
+        let supportedDispositions = ["ignore", "carry", "commit"]
+        guard supportedActions.contains(result.action),
+              supportedDispositions.contains(result.normalizedDisposition) else {
+            throw WorkstateStorageError.invalidState("Router returned an unsupported action")
+        }
+        if result.normalizedDisposition == "ignore" {
+            guard result.action == "ignore",
+                  result.projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  (result.bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  (result.signals ?? []).isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "An ignored turn cannot route a project or semantic bundle"
+                )
+            }
+            return
+        }
+        guard result.action != "ignore",
+              !result.projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !(result.bundleId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !(result.bundleTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !(result.bundleSummary ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkstateStorageError.invalidState(
+                "A carried or committed turn requires a project and semantic bundle"
+            )
+        }
+        if result.normalizedDisposition == "commit", (result.signals ?? []).isEmpty {
+            throw WorkstateStorageError.invalidState(
+                "A committed semantic bundle requires at least one durable signal"
+            )
+        }
+        if result.action == "new_project" {
+            guard !result.projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !result.projectSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "A new project route requires name and summary"
+                )
+            }
+        }
     }
 
     public func routeBatch(
@@ -89,30 +155,94 @@ public struct AgentRuntimeClient: Sendable {
         scanner: CodexSessionScanner
     ) throws -> [BatchRouteDecision] {
         guard !segments.isEmpty else { return [] }
+        guard let first = segments.first,
+              segments.allSatisfy({ $0.threadID == first.threadID }) else {
+            throw WorkstateStorageError.invalidState(
+                "A Router batch must contain exactly one conversation thread"
+            )
+        }
         let request = BatchRouteRequest(
             mode: "batch_route",
             profile: try runtimeProfile(.route),
             segments: segments.map(BatchRouteSegmentPayload.init),
-            projects: workspace.projects.map(PortfolioProjectPayload.init),
+            projects: workspace.projects.map(RoutingProjectPayload.init),
             routeHints: routeHints.map {
                 BatchRouteHintPayload(threadID: $0.key, projectID: $0.value)
             }
-            .sorted { $0.threadID < $1.threadID }
+            .sorted { $0.threadID < $1.threadID },
+            recentTurns: try scanner.recentSegments(
+                threadID: first.threadID,
+                before: first.timestamp,
+                limit: 3
+            ).map(BatchRouteSegmentPayload.init),
+            openBundles: try scanner.openSemanticBundles()
+                .filter { $0.threadID == first.threadID }
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .prefix(30)
+                .map(OpenSemanticBundlePayload.init)
         )
         let envelope: RuntimeEnvelope<BatchRouteResult> = try run(request, timeout: 600)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         try appendRun(
             envelope,
             segmentID: "batch-route:\(segments.first!.id):\(segments.count)"
         )
-        let expected = Set(segments.map(\.id))
-        let actual = Set(envelope.result.routes.map(\.segmentId))
-        guard actual == expected, actual.count == envelope.result.routes.count else {
+        guard Set(segments.map(\.turnID)).count == segments.count else {
             throw WorkstateStorageError.invalidState(
-                "Batch Router did not return exactly one decision for every segment"
+                "A Router batch contains duplicate turn ids"
             )
         }
-        return envelope.result.routes
+        let segmentIDByPosition = Dictionary(
+            uniqueKeysWithValues: segments.enumerated().map { ($0.offset + 1, $0.element.id) }
+        )
+        var nextPosition = 1
+        var decisions: [BatchRouteDecision] = []
+        for packet in envelope.result.routes {
+            guard packet.startPosition == nextPosition,
+                  packet.endPosition >= packet.startPosition,
+                  packet.endPosition <= segments.count else {
+                throw WorkstateStorageError.invalidState(
+                    "Batch Router returned a non-contiguous semantic partition"
+                )
+            }
+            try validateRouteResult(packet.routeResult)
+            if packet.action == "new_project",
+               workspace.project(id: packet.projectId) != nil {
+                throw WorkstateStorageError.invalidState(
+                    "Batch Router tried to recreate an existing project: \(packet.projectId)"
+                )
+            }
+            for position in packet.startPosition...packet.endPosition {
+                guard let segmentID = segmentIDByPosition[position] else {
+                    throw WorkstateStorageError.invalidState(
+                        "Batch Router returned an unknown evidence position"
+                    )
+                }
+                decisions.append(
+                    BatchRouteDecision(
+                        segmentId: segmentID,
+                        action: packet.action,
+                        projectId: packet.projectId,
+                        projectName: packet.projectName,
+                        projectSummary: packet.projectSummary,
+                        disposition: packet.disposition,
+                        bundleId: packet.bundleId,
+                        bundleTitle: packet.bundleTitle,
+                        bundleSummary: packet.bundleSummary,
+                        signals: packet.signals,
+                        confidence: packet.confidence,
+                        reason: packet.reason
+                    )
+                )
+            }
+            nextPosition = packet.endPosition + 1
+        }
+        guard nextPosition == segments.count + 1 else {
+            throw WorkstateStorageError.invalidState(
+                "Batch Router did not cover every input segment exactly once"
+            )
+        }
+        return decisions
     }
 
     public func steward(
@@ -127,9 +257,16 @@ public struct AgentRuntimeClient: Sendable {
             project: StewardProjectPayload(project: project)
         )
         let envelope: RuntimeEnvelope<StewardResult> = try run(request, timeout: 300)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try validateStewardResult(envelope.result)
+        var activeWorklineIDs = Set(project.tasks.filter { $0.status == .active }.map(\.id))
+        var knownWorklineIDs = Set(project.tasks.map(\.id))
+        try validateStewardWorklineState(
+            envelope.result,
+            activeWorklineIDs: &activeWorklineIDs,
+            knownWorklineIDs: &knownWorklineIDs
+        )
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         try appendRun(envelope, segmentID: segment.id)
-        try appendDecision(envelope, segmentID: segment.id)
         return envelope.result
     }
 
@@ -137,8 +274,8 @@ public struct AgentRuntimeClient: Sendable {
         segments: [SessionSegment],
         project: ProjectRecord,
         scanner: CodexSessionScanner
-    ) throws -> [BatchStewardDecision] {
-        guard !segments.isEmpty else { return [] }
+    ) throws -> BatchStewardResult {
+        guard !segments.isEmpty else { return BatchStewardResult(changes: []) }
         let request = BatchStewardRequest(
             mode: "batch_steward",
             profile: try runtimeProfile(.steward),
@@ -146,23 +283,148 @@ public struct AgentRuntimeClient: Sendable {
             project: StewardProjectPayload(project: project)
         )
         let envelope: RuntimeEnvelope<BatchStewardResult> = try run(request, timeout: 600)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         try appendRun(
             envelope,
             segmentID: "batch-steward:\(segments.first!.id):\(segments.count)"
         )
-        try appendDecision(
-            envelope,
-            segmentID: "batch-steward:\(segments.first!.id):\(segments.count)"
-        )
-        let expected = segments.map(\.id)
-        let actual = envelope.result.decisions.map(\.segmentId)
-        guard actual == expected, Set(actual).count == actual.count else {
+        let expected = Set(segments.map(\.id))
+        var previousIndex = -1
+        var semanticChanges = Set<Data>()
+        var activeWorklineIDs = Set(project.tasks.filter { $0.status == .active }.map(\.id))
+        var knownWorklineIDs = Set(project.tasks.map(\.id))
+        for change in envelope.result.changes {
+            try validateStewardResult(change.result)
+            try validateStewardWorklineState(
+                change.result,
+                activeWorklineIDs: &activeWorklineIDs,
+                knownWorklineIDs: &knownWorklineIDs
+            )
+            guard !change.evidenceIds.isEmpty,
+                  Set(change.evidenceIds).isSubset(of: expected),
+                  change.result.classification == "ordinary_delta" else {
+                throw WorkstateStorageError.invalidState(
+                    "Batch Steward returned an invalid semantic change"
+                )
+            }
+            let firstIndex = change.evidenceIds.compactMap { evidenceID in
+                segments.firstIndex(where: { $0.id == evidenceID })
+            }.min() ?? -1
+            guard firstIndex >= previousIndex else {
+                throw WorkstateStorageError.invalidState(
+                    "Batch Steward returned changes out of chronological order"
+                )
+            }
+            let semanticChange = try WorkstateCoding.makeEncoder(pretty: false).encode(change)
+            guard semanticChanges.insert(semanticChange).inserted else {
+                throw WorkstateStorageError.invalidState(
+                    "Batch Steward returned a duplicate semantic change"
+                )
+            }
+            previousIndex = firstIndex
+        }
+        return envelope.result
+    }
+
+    private func validateStewardResult(_ result: StewardResult) throws {
+        guard result.classification == "no_change"
+                || result.classification == "ordinary_delta" else {
             throw WorkstateStorageError.invalidState(
-                "Batch Steward did not return exactly one ordered decision for every segment"
+                "Steward returned an unsupported classification"
             )
         }
-        return envelope.result.decisions
+        if result.classification == "no_change" {
+            guard result.worklineAction == "none",
+                  result.contextPatch?.isEmpty != false,
+                  (result.topicUpdates ?? []).isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "A no-change Steward result cannot mutate worklines or Project HEAD"
+                )
+            }
+            return
+        }
+        let closure = result.closureDisposition ?? "none"
+        if result.worklineAction == "complete_existing" {
+            guard closure != "none" else {
+                throw WorkstateStorageError.invalidState(
+                    "Completing a workline requires a closure disposition"
+                )
+            }
+        } else {
+            guard closure == "none" else {
+                throw WorkstateStorageError.invalidState(
+                    "Only explicit workline completion may use a closure disposition"
+                )
+            }
+            let nextFocus = result.nextFocusedWorklineId ?? ""
+            if result.worklineAction == "none" {
+                guard nextFocus.isEmpty else {
+                    throw WorkstateStorageError.invalidState(
+                        "A project-wide delta cannot change workline focus"
+                    )
+                }
+            } else if !nextFocus.isEmpty, nextFocus != result.worklineId {
+                throw WorkstateStorageError.invalidState(
+                    "A continuing or new workline may only focus itself"
+                )
+            }
+        }
+        guard !result.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !result.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkstateStorageError.invalidState(
+                "A durable Steward result requires a title and summary"
+            )
+        }
+        if let patch = result.contextPatch, !patch.isEmpty {
+            guard !patch.revisionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !patch.revisionSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "A Project HEAD patch requires revision context"
+                )
+            }
+        }
+    }
+
+    private func validateStewardWorklineState(
+        _ result: StewardResult,
+        activeWorklineIDs: inout Set<String>,
+        knownWorklineIDs: inout Set<String>
+    ) throws {
+        let worklineID = result.worklineId
+        switch result.worklineAction {
+        case "none":
+            return
+        case "continue_existing":
+            guard activeWorklineIDs.contains(worklineID) else {
+                throw WorkstateStorageError.invalidState(
+                    "Steward tried to continue an inactive workline: \(worklineID)"
+                )
+            }
+        case "complete_existing":
+            guard activeWorklineIDs.remove(worklineID) != nil else {
+                throw WorkstateStorageError.invalidState(
+                    "Steward tried to complete an inactive workline: \(worklineID)"
+                )
+            }
+            let nextFocus = result.nextFocusedWorklineId ?? ""
+            guard nextFocus.isEmpty || activeWorklineIDs.contains(nextFocus) else {
+                throw WorkstateStorageError.invalidState(
+                    "Steward focused an inactive workline after completion: \(nextFocus)"
+                )
+            }
+        case "start_new":
+            guard !worklineID.isEmpty,
+                  knownWorklineIDs.insert(worklineID).inserted else {
+                throw WorkstateStorageError.invalidState(
+                    "Steward tried to reuse an existing workline id: \(worklineID)"
+                )
+            }
+            activeWorklineIDs.insert(worklineID)
+        default:
+            throw WorkstateStorageError.invalidState(
+                "Steward returned an unsupported workline action"
+            )
+        }
     }
 
     public func rebuild(
@@ -179,7 +441,7 @@ public struct AgentRuntimeClient: Sendable {
             sourceThreadIds: sourceThreadIDs
         )
         let envelope: RuntimeEnvelope<ProjectRebuildProposal> = try run(request, timeout: 600)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         try appendRun(envelope, segmentID: "rebuild:\(project.id)")
         return envelope.result
     }
@@ -200,10 +462,10 @@ public struct AgentRuntimeClient: Sendable {
             segments: segments
         )
         let envelope: RuntimeEnvelope<DistillationResult> = try run(request, timeout: 300)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         try appendRun(envelope, segmentID: "rebuild-distill:\(project.id):\(chunkIndex)")
         return RebuildDistilledChunk(
-            schemaVersion: 2,
+            schemaVersion: 3,
             chunkIndex: chunkIndex,
             chunkCount: chunkCount,
             evidenceIds: segments.map(\.id),
@@ -215,20 +477,25 @@ public struct AgentRuntimeClient: Sendable {
         project: ProjectRecord,
         history: [ProjectOwnerMessage],
         message: String,
-        activeTopicID: String? = nil
+        activeTopicID: String? = nil,
+        openBundles: [OpenSemanticBundle] = []
     ) throws -> ProjectOwnerChatResponse {
         let request = OwnerChatRequest(
             mode: "owner_chat",
             profile: try runtimeProfile(.ownerChat),
             project: StewardProjectPayload(project: project),
+            openBundles: openBundles
+                .filter { $0.projectID == project.id }
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .prefix(30)
+                .map(OpenSemanticBundlePayload.init),
             history: history,
             message: message,
             activeTopicId: activeTopicID ?? ""
         )
         let envelope: RuntimeEnvelope<ProjectOwnerChatResult> = try run(request, timeout: 300)
-        try CodexSessionScanner().excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: CodexSessionScanner())
         try appendRun(envelope, segmentID: "owner-chat:\(project.id):\(UUID().uuidString.lowercased())")
-        try appendDecision(envelope, segmentID: "owner-chat:\(project.id)")
         return ProjectOwnerChatResponse(
             reply: envelope.result.reply,
             topicUpdates: envelope.result.topicUpdates,
@@ -249,7 +516,7 @@ public struct AgentRuntimeClient: Sendable {
             projects: workspace.projects.map(PortfolioProjectPayload.init)
         )
         let envelope: RuntimeEnvelope<GlobalChatRouteResult> = try run(request, timeout: 300)
-        try CodexSessionScanner().excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: CodexSessionScanner())
         guard workspace.project(id: envelope.result.projectId) != nil else {
             throw WorkstateStorageError.invalidState(
                 "Global chat Router returned unknown project \(envelope.result.projectId)"
@@ -257,7 +524,6 @@ public struct AgentRuntimeClient: Sendable {
         }
         let segmentID = "global-chat-route:\(UUID().uuidString.lowercased())"
         try appendRun(envelope, segmentID: segmentID)
-        try appendDecision(envelope, segmentID: segmentID)
         return GlobalChatRouteResponse(
             projectID: envelope.result.projectId,
             reason: envelope.result.reason,
@@ -278,10 +544,9 @@ public struct AgentRuntimeClient: Sendable {
             message: message
         )
         let envelope: RuntimeEnvelope<CollaborationStewardResult> = try run(request, timeout: 300)
-        try CodexSessionScanner().excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: CodexSessionScanner())
         let segmentID = "collaboration-steward:\(UUID().uuidString.lowercased())"
         try appendRun(envelope, segmentID: segmentID)
-        try appendDecision(envelope, segmentID: segmentID)
         return CollaborationStewardResponse(
             reply: envelope.result.reply,
             mutations: envelope.result.mutations,
@@ -307,10 +572,9 @@ public struct AgentRuntimeClient: Sendable {
             }
         )
         let envelope: RuntimeEnvelope<BriefComposerResult> = try run(request, timeout: 300)
-        try scanner.excludeThread(envelope.runtimeThreadId)
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
         let segmentID = "brief:\(brief.dateKey):\(brief.sourceRevision.prefix(12))"
         try appendRun(envelope, segmentID: segmentID)
-        try appendDecision(envelope, segmentID: segmentID)
         return DailyBriefNarrative(
             sourceRevision: brief.sourceRevision,
             overview: envelope.result.overview,
@@ -322,12 +586,18 @@ public struct AgentRuntimeClient: Sendable {
     }
 
     public func dailyInputTokens(now: Date = Date()) throws -> Int {
-        let url = runtimeRoot.appendingPathComponent("agent-runs.jsonl")
+        let usageURL = runtimeRoot.appendingPathComponent("agent-usage.jsonl")
+        let url = FileManager.default.fileExists(atPath: usageURL.path)
+            ? usageURL
+            : runtimeRoot.appendingPathComponent("agent-runs.jsonl")
         guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
         let start = Calendar.current.startOfDay(for: now)
         let data = try Data(contentsOf: url)
         return data.split(separator: 0x0A).reduce(into: 0) { total, line in
-            guard let record = try? WorkstateCoding.makeDecoder().decode(AgentRunRecord.self, from: Data(line)),
+            guard let record = try? WorkstateCoding.makeDecoder().decode(
+                AgentUsageJournalRecord.self,
+                from: Data(line)
+            ),
                   record.timestamp >= start else { return }
             total += record.usage?.inputTokens ?? 0
         }
@@ -338,6 +608,14 @@ public struct AgentRuntimeClient: Sendable {
         let workspaceHasProjects = (try? repository.load().projects.isEmpty == false) ?? false
         let settings = try settingsRepository.load(workspaceHasProjects: workspaceHasProjects)
         return RuntimeProfilePayload(settings.profile(for: role))
+    }
+
+    private func excludePersistentRuntimeThread(
+        _ threadID: String,
+        scanner: CodexSessionScanner
+    ) throws {
+        guard !threadID.isEmpty, !threadID.hasPrefix("ephemeral-") else { return }
+        try scanner.excludeThread(threadID)
     }
 
     private func run<Request: Encodable, Result: Decodable>(
@@ -351,18 +629,29 @@ public struct AgentRuntimeClient: Sendable {
             throw AgentRuntimeError.missingRuntime(runtimeScript.path)
         }
         try FileManager.default.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
-        let requestURL = runtimeRoot.appendingPathComponent("agent-request-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: requestURL) }
-        try WorkstateCoding.makeEncoder().encode(request).write(to: requestURL, options: .atomic)
+        let workerLock = try AgentWorkerLock(root: runtimeRoot)
+        defer { workerLock.unlock() }
+        let requestData = try WorkstateCoding.makeEncoder().encode(request)
+        guard requestData.count <= 2 * 1024 * 1024 else {
+            throw AgentRuntimeError.failed("Agent request exceeded 2 MiB")
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: nodePath)
-        process.arguments = [runtimeScript.path, requestURL.path]
+        process.arguments = [runtimeScript.path]
         process.currentDirectoryURL = runtimeScript.deletingLastPathComponent().deletingLastPathComponent()
+        var environment = ProcessInfo.processInfo.environment
+        environment["WORKSTATE_RUNTIME_ROOT"] = runtimeRoot.path
+        environment["WORKSTATE_SOURCE_CODEX_HOME"] = environment["CODEX_HOME"]
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true).path
+        process.environment = environment
+        let input = Pipe()
         let output = Pipe()
         let error = Pipe()
-        let outputCapture = PipeCapture(pipe: output, maximumBytes: 64 * 1024 * 1024)
-        let errorCapture = PipeCapture(pipe: error, maximumBytes: 8 * 1024 * 1024)
+        let outputCapture = PipeCapture(pipe: output, maximumBytes: 8 * 1024 * 1024)
+        let errorCapture = PipeCapture(pipe: error, maximumBytes: 2 * 1024 * 1024)
+        process.standardInput = input
         process.standardOutput = output
         process.standardError = error
         outputCapture.start()
@@ -374,6 +663,13 @@ public struct AgentRuntimeClient: Sendable {
         try process.run()
         processRegistry.register(process)
         defer { processRegistry.clear(process) }
+        do {
+            try input.fileHandleForWriting.write(contentsOf: requestData)
+            try input.fileHandleForWriting.close()
+        } catch {
+            processRegistry.terminate(process)
+            throw AgentRuntimeError.failed("Could not stream the Agent request: \(error.localizedDescription)")
+        }
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
@@ -386,14 +682,14 @@ public struct AgentRuntimeClient: Sendable {
         let outputResult = outputCapture.finish()
         let errorResult = errorCapture.finish()
         guard !outputResult.exceededLimit else {
-            throw AgentRuntimeError.failed("Agent runtime output exceeded 64 MiB")
+            throw AgentRuntimeError.failed("Agent runtime output exceeded 8 MiB")
         }
         let errorText = String(
             data: errorResult.data,
             encoding: .utf8
         ) ?? ""
         guard !errorResult.exceededLimit else {
-            throw AgentRuntimeError.failed("Agent runtime error output exceeded 8 MiB")
+            throw AgentRuntimeError.failed("Agent runtime error output exceeded 2 MiB")
         }
         guard process.terminationStatus == 0 else {
             throw AgentRuntimeError.failed(errorText.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -406,6 +702,7 @@ public struct AgentRuntimeClient: Sendable {
         segmentID: String
     ) throws {
         let url = runtimeRoot.appendingPathComponent("agent-runs.jsonl")
+        try rotateRunLogIfNeeded(url)
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
@@ -414,7 +711,8 @@ public struct AgentRuntimeClient: Sendable {
             mode: envelope.mode,
             segmentID: segmentID,
             runtimeThreadID: envelope.runtimeThreadId,
-            usage: envelope.usage
+            usage: envelope.usage,
+            telemetry: envelope.telemetry
         )
         var data = try WorkstateCoding.makeEncoder(pretty: false).encode(record)
         data.append(0x0A)
@@ -424,27 +722,43 @@ public struct AgentRuntimeClient: Sendable {
         try handle.write(contentsOf: data)
     }
 
-    private func appendDecision<Result: Encodable>(
-        _ envelope: RuntimeEnvelope<Result>,
-        segmentID: String
-    ) throws {
-        let url = runtimeRoot.appendingPathComponent("agent-decisions.jsonl")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+    private func rotateRunLogIfNeeded(_ url: URL, maximumBytes: Int = 2 * 1024 * 1024) throws {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size >= maximumBytes else { return }
+        let previous = url.deletingPathExtension().appendingPathExtension("previous.jsonl")
+        if FileManager.default.fileExists(atPath: previous.path) {
+            try FileManager.default.removeItem(at: previous)
         }
-        let record = AgentDecisionRecord(
-            timestamp: Date(),
-            mode: envelope.mode,
-            segmentID: segmentID,
-            runtimeThreadID: envelope.runtimeThreadId,
-            result: envelope.result
-        )
-        var data = try WorkstateCoding.makeEncoder(pretty: false).encode(record)
-        data.append(0x0A)
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
+        try FileManager.default.moveItem(at: url, to: previous)
+    }
+
+}
+
+private final class AgentWorkerLock {
+    private var descriptor: Int32
+
+    init(root: URL) throws {
+        let url = root.appendingPathComponent("agent-worker.lock")
+        descriptor = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw AgentRuntimeError.failed("Could not create the Agent worker lock")
+        }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            descriptor = -1
+            throw AgentRuntimeError.busy
+        }
+    }
+
+    func unlock() {
+        guard descriptor >= 0 else { return }
+        flock(descriptor, LOCK_UN)
+        close(descriptor)
+        descriptor = -1
+    }
+
+    deinit {
+        unlock()
     }
 }
 
@@ -535,17 +849,17 @@ private final class AgentProcessRegistry: @unchecked Sendable {
 
     func terminate(_ process: Process) {
         guard process.isRunning else { return }
-        let descendants = Process()
-        descendants.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        descendants.arguments = ["-TERM", "-P", String(process.processIdentifier)]
-        try? descendants.run()
-        descendants.waitUntilExit()
         process.terminate()
-        let graceDeadline = Date().addingTimeInterval(2)
+        let graceDeadline = Date().addingTimeInterval(3)
         while process.isRunning && Date() < graceDeadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
         if process.isRunning {
+            let descendants = Process()
+            descendants.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            descendants.arguments = ["-KILL", "-P", String(process.processIdentifier)]
+            try? descendants.run()
+            descendants.waitUntilExit()
             kill(process.processIdentifier, SIGKILL)
         }
     }
@@ -556,6 +870,11 @@ public struct RouteResult: Codable, Equatable, Sendable {
     public var projectId: String
     public var projectName: String
     public var projectSummary: String
+    public var disposition: String?
+    public var bundleId: String?
+    public var bundleTitle: String?
+    public var bundleSummary: String?
+    public var signals: [RouteSignal]?
     public var confidence: Double
     public var reason: String
 
@@ -564,6 +883,11 @@ public struct RouteResult: Codable, Equatable, Sendable {
         projectId: String,
         projectName: String,
         projectSummary: String,
+        disposition: String? = nil,
+        bundleId: String? = nil,
+        bundleTitle: String? = nil,
+        bundleSummary: String? = nil,
+        signals: [RouteSignal]? = nil,
         confidence: Double,
         reason: String
     ) {
@@ -571,8 +895,29 @@ public struct RouteResult: Codable, Equatable, Sendable {
         self.projectId = projectId
         self.projectName = projectName
         self.projectSummary = projectSummary
+        self.disposition = disposition
+        self.bundleId = bundleId
+        self.bundleTitle = bundleTitle
+        self.bundleSummary = bundleSummary
+        self.signals = signals
         self.confidence = confidence
         self.reason = reason
+    }
+
+    public var normalizedDisposition: String {
+        disposition ?? (action == "ignore" ? "ignore" : "commit")
+    }
+}
+
+public struct RouteSignal: Codable, Equatable, Sendable {
+    public var type: String
+    public var authority: String
+    public var summary: String
+
+    public init(type: String, authority: String, summary: String) {
+        self.type = type
+        self.authority = authority
+        self.summary = summary
     }
 }
 
@@ -582,6 +927,11 @@ public struct BatchRouteDecision: Codable, Equatable, Sendable {
     public var projectId: String
     public var projectName: String
     public var projectSummary: String
+    public var disposition: String?
+    public var bundleId: String?
+    public var bundleTitle: String?
+    public var bundleSummary: String?
+    public var signals: [RouteSignal]?
     public var confidence: Double
     public var reason: String
 
@@ -591,6 +941,11 @@ public struct BatchRouteDecision: Codable, Equatable, Sendable {
             projectId: projectId,
             projectName: projectName,
             projectSummary: projectSummary,
+            disposition: disposition,
+            bundleId: bundleId,
+            bundleTitle: bundleTitle,
+            bundleSummary: bundleSummary,
+            signals: signals,
             confidence: confidence,
             reason: reason
         )
@@ -616,7 +971,8 @@ public struct StewardResult: Codable, Equatable, Sendable {
     public var stage: String
     public var delivery: String
     public var facts: [String]
-    public var openIssues: [String]
+    public var contextPatch: StewardContextPatch?
+    public var topicUpdates: [StewardTopicUpdate]?
 
     public init(
         classification: String,
@@ -637,7 +993,8 @@ public struct StewardResult: Codable, Equatable, Sendable {
         stage: String,
         delivery: String,
         facts: [String],
-        openIssues: [String]
+        contextPatch: StewardContextPatch? = nil,
+        topicUpdates: [StewardTopicUpdate]? = nil
     ) {
         self.classification = classification
         self.title = title
@@ -657,17 +1014,110 @@ public struct StewardResult: Codable, Equatable, Sendable {
         self.stage = stage
         self.delivery = delivery
         self.facts = facts
-        self.openIssues = openIssues
+        self.contextPatch = contextPatch
+        self.topicUpdates = topicUpdates
     }
 }
 
-public struct BatchStewardDecision: Codable, Equatable, Sendable {
-    public var segmentId: String
+public struct StewardTopicUpdate: Codable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var summary: String
+    public var status: String
+    public var kind: String
+    public var disposition: String
+    public var currentUnderstanding: String
+    public var proposedDirection: String
+    public var deferredReason: String
+    public var revisitTrigger: String
+    public var openQuestions: [String]
+}
+
+public struct StewardUnderstandingPatch: Codable, Equatable, Sendable {
+    public var id: String
+    public var text: String
+    public var status: String
+
+    public init(id: String, text: String, status: String) {
+        self.id = id
+        self.text = text
+        self.status = status
+    }
+}
+
+public struct StewardDecisionPatch: Codable, Equatable, Sendable {
+    public var id: String
+    public var text: String
+    public var rationale: String
+
+    public init(id: String, text: String, rationale: String) {
+        self.id = id
+        self.text = text
+        self.rationale = rationale
+    }
+}
+
+public struct StewardContextPatch: Codable, Equatable, Sendable {
+    public var currentSummary: String
+    public var revisionTitle: String
+    public var revisionSummary: String
+    public var revisionStatus: String
+    public var changes: [String]
+    public var understandingUpserts: [StewardUnderstandingPatch]
+    public var supersededUnderstandingIds: [String]
+    public var decisionUpserts: [StewardDecisionPatch]
+    public var supersededDecisionIds: [String]
+    public var forbiddenDirectionAdditions: [String]
+    public var forbiddenDirectionRemovals: [String]
+
+    public init(
+        currentSummary: String = "",
+        revisionTitle: String = "",
+        revisionSummary: String = "",
+        revisionStatus: String = "observed",
+        changes: [String] = [],
+        understandingUpserts: [StewardUnderstandingPatch] = [],
+        supersededUnderstandingIds: [String] = [],
+        decisionUpserts: [StewardDecisionPatch] = [],
+        supersededDecisionIds: [String] = [],
+        forbiddenDirectionAdditions: [String] = [],
+        forbiddenDirectionRemovals: [String] = []
+    ) {
+        self.currentSummary = currentSummary
+        self.revisionTitle = revisionTitle
+        self.revisionSummary = revisionSummary
+        self.revisionStatus = revisionStatus
+        self.changes = changes
+        self.understandingUpserts = understandingUpserts
+        self.supersededUnderstandingIds = supersededUnderstandingIds
+        self.decisionUpserts = decisionUpserts
+        self.supersededDecisionIds = supersededDecisionIds
+        self.forbiddenDirectionAdditions = forbiddenDirectionAdditions
+        self.forbiddenDirectionRemovals = forbiddenDirectionRemovals
+    }
+
+    public var isEmpty: Bool {
+        currentSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && understandingUpserts.isEmpty
+            && supersededUnderstandingIds.isEmpty
+            && decisionUpserts.isEmpty
+            && supersededDecisionIds.isEmpty
+            && forbiddenDirectionAdditions.isEmpty
+            && forbiddenDirectionRemovals.isEmpty
+    }
+}
+
+public struct BatchStewardChange: Codable, Equatable, Sendable {
+    public var evidenceIds: [String]
     public var result: StewardResult
 }
 
 public struct BatchStewardResult: Codable, Equatable, Sendable {
-    public var decisions: [BatchStewardDecision]
+    public var changes: [BatchStewardChange]
+
+    public init(changes: [BatchStewardChange]) {
+        self.changes = changes
+    }
 }
 
 public struct DistillationResult: Codable, Equatable, Sendable {
@@ -759,7 +1209,7 @@ public struct RebuildDistilledChunk: Codable, Equatable, Sendable {
     public var items: [DistilledEvidenceItem]
 
     public init(
-        schemaVersion: Int? = 2,
+        schemaVersion: Int? = 3,
         chunkIndex: Int,
         chunkCount: Int,
         evidenceIds: [String],
@@ -777,17 +1227,56 @@ private struct RouteRequest: Codable {
     var mode: String
     var profile: RuntimeProfilePayload
     var segment: SessionSegment
-    var projects: [PortfolioProjectPayload]
+    var projects: [RoutingProjectPayload]
     var priorRoute: RouteBindingPayload?
     var recentTurns: [SessionSegment]
+    var openBundles: [OpenSemanticBundlePayload]
+}
+
+private struct OpenSemanticBundlePayload: Codable {
+    var id: String
+    var threadID: String
+    var projectId: String
+    var disposition: String
+    var title: String
+    var summary: String
+    var evidenceCount: Int
+    var updatedAt: Date
+
+    init(bundle: OpenSemanticBundle) {
+        id = bundle.id
+        threadID = bundle.threadID
+        projectId = bundle.projectID
+        disposition = bundle.disposition
+        title = boundedText(bundle.title, limit: 300)
+        summary = boundedText(bundle.summary, limit: 2_000)
+        evidenceCount = bundle.evidenceIDs.count
+        updatedAt = bundle.updatedAt
+    }
 }
 
 private struct BatchRouteRequest: Codable {
     var mode: String
     var profile: RuntimeProfilePayload
     var segments: [BatchRouteSegmentPayload]
-    var projects: [PortfolioProjectPayload]
+    var projects: [RoutingProjectPayload]
     var routeHints: [BatchRouteHintPayload]
+    var recentTurns: [BatchRouteSegmentPayload]
+    var openBundles: [OpenSemanticBundlePayload]
+}
+
+private struct RoutingProjectPayload: Codable {
+    var id: String
+    var name: String
+    var purpose: String
+    var status: String
+
+    init(project: ProjectRecord) {
+        id = project.id
+        name = project.name
+        purpose = boundedText(project.context.purpose, limit: 2_000)
+        status = project.status.rawValue
+    }
 }
 
 private struct BatchRouteSegmentPayload: Codable {
@@ -796,6 +1285,7 @@ private struct BatchRouteSegmentPayload: Codable {
     var turnID: String
     var cwd: String
     var userText: String
+    var assistantText: String
     var timestamp: Date
 
     init(segment: SessionSegment) {
@@ -804,6 +1294,7 @@ private struct BatchRouteSegmentPayload: Codable {
         turnID = segment.turnID
         cwd = segment.cwd
         userText = segment.userText
+        assistantText = segment.assistantText
         timestamp = segment.timestamp
     }
 }
@@ -814,7 +1305,39 @@ private struct BatchRouteHintPayload: Codable {
 }
 
 private struct BatchRouteResult: Codable {
-    var routes: [BatchRouteDecision]
+    var routes: [BatchRoutePacket]
+}
+
+private struct BatchRoutePacket: Codable {
+    var startPosition: Int
+    var endPosition: Int
+    var action: String
+    var projectId: String
+    var projectName: String
+    var projectSummary: String
+    var disposition: String?
+    var bundleId: String?
+    var bundleTitle: String?
+    var bundleSummary: String?
+    var signals: [RouteSignal]?
+    var confidence: Double
+    var reason: String
+
+    var routeResult: RouteResult {
+        RouteResult(
+            action: action,
+            projectId: projectId,
+            projectName: projectName,
+            projectSummary: projectSummary,
+            disposition: disposition,
+            bundleId: bundleId,
+            bundleTitle: bundleTitle,
+            bundleSummary: bundleSummary,
+            signals: signals,
+            confidence: confidence,
+            reason: reason
+        )
+    }
 }
 
 private struct PortfolioProjectPayload: Codable {
@@ -882,6 +1405,7 @@ private struct OwnerChatRequest: Codable {
     var mode: String
     var profile: RuntimeProfilePayload
     var project: StewardProjectPayload
+    var openBundles: [OpenSemanticBundlePayload]
     var history: [ProjectOwnerMessage]
     var message: String
     var activeTopicId: String
@@ -950,6 +1474,11 @@ private struct BriefRecordPayload: Codable {
     }
 }
 
+private func boundedText(_ value: String, limit: Int) -> String {
+    guard value.count > limit else { return value }
+    return String(value.prefix(limit))
+}
+
 private struct ProjectPayload: Codable {
     var id: String
     var name: String
@@ -962,13 +1491,14 @@ private struct ProjectPayload: Codable {
     init(project: ProjectRecord) {
         id = project.id
         name = project.name
-        summary = project.context.currentSummary
-        purpose = project.context.purpose
+        summary = boundedText(project.context.currentSummary, limit: 4_000)
+        purpose = boundedText(project.context.purpose, limit: 2_000)
         status = project.status.rawValue
         focusedWorklineId = project.focusedTaskID ?? ""
         activeWorklines = project.tasks
-            .filter { $0.status != .completed && $0.status != .abandoned }
+            .filter { $0.status == .active }
             .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(20)
             .map(WorklinePayload.init)
     }
 }
@@ -981,37 +1511,69 @@ private struct StewardProjectPayload: Codable {
     var status: String
     var focusedWorklineId: String
     var activeWorklines: [WorklinePayload]
-    var currentUnderstanding: [String]
-    var acceptedDecisions: [String]
+    var currentUnderstanding: [StewardUnderstandingPayload]
+    var acceptedDecisions: [StewardDecisionPayload]
     var forbiddenDirections: [String]
-    var openIssues: [String]
     var recentDeltas: [DeltaPayload]
     var topics: [TopicPayload]
 
     init(project: ProjectRecord) {
         id = project.id
         name = project.name
-        summary = project.context.currentSummary
-        purpose = project.context.purpose
+        summary = boundedText(project.context.currentSummary, limit: 4_000)
+        purpose = boundedText(project.context.purpose, limit: 2_000)
         status = project.status.rawValue
         focusedWorklineId = project.focusedTaskID ?? ""
         activeWorklines = project.tasks
-            .filter { $0.status != .completed && $0.status != .abandoned }
+            .filter { $0.status == .active }
             .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(20)
             .map(WorklinePayload.init)
         currentUnderstanding = project.context.understanding
-            .filter { $0.status == .confirmed || $0.status == .observed }
-            .map(\.text)
-        acceptedDecisions = project.context.acceptedDecisions.map(\.text)
-        forbiddenDirections = project.context.forbiddenDirections
-        openIssues = project.context.openIssues
+            .filter { $0.status == .confirmed || $0.status == .observed || $0.status == .inferred }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(50)
+            .map(StewardUnderstandingPayload.init)
+        acceptedDecisions = project.context.acceptedDecisions
+            .filter { $0.status == .confirmed }
+            .prefix(50)
+            .map(StewardDecisionPayload.init)
+        forbiddenDirections = project.context.forbiddenDirections.prefix(30).map {
+            boundedText($0, limit: 1_000)
+        }
         recentDeltas = project.events
             .sorted { $0.timestamp > $1.timestamp }
             .prefix(6)
             .map(DeltaPayload.init)
         topics = project.topics
             .filter { $0.status == .captured || $0.status == .discussing }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(30)
             .map(TopicPayload.init)
+    }
+}
+
+private struct StewardUnderstandingPayload: Codable {
+    var id: String
+    var text: String
+    var status: String
+
+    init(_ statement: ContextStatement) {
+        id = statement.id
+        text = boundedText(statement.text, limit: 2_000)
+        status = statement.status.rawValue
+    }
+}
+
+private struct StewardDecisionPayload: Codable {
+    var id: String
+    var text: String
+    var rationale: String
+
+    init(_ decision: DecisionRecord) {
+        id = decision.id
+        text = boundedText(decision.text, limit: 2_000)
+        rationale = boundedText(decision.rationale, limit: 1_000)
     }
 }
 
@@ -1028,14 +1590,14 @@ private struct TopicPayload: Codable {
 
     init(topic: ProjectTopic) {
         id = topic.id
-        title = topic.title
-        summary = topic.summary
+        title = boundedText(topic.title, limit: 300)
+        summary = boundedText(topic.summary, limit: 2_000)
         status = topic.status.rawValue
         kind = topic.kind.rawValue
         disposition = (topic.disposition ?? .futureDecision).rawValue
-        currentUnderstanding = topic.currentUnderstanding
-        proposedDirection = topic.proposedDirection
-        openQuestions = topic.openQuestions
+        currentUnderstanding = boundedText(topic.currentUnderstanding, limit: 2_000)
+        proposedDirection = boundedText(topic.proposedDirection, limit: 2_000)
+        openQuestions = topic.openQuestions.prefix(10).map { boundedText($0, limit: 500) }
     }
 }
 
@@ -1046,22 +1608,22 @@ private struct RebuildProjectPayload: Codable {
     var purpose: String
     var status: String
     var activeWorklines: [WorklinePayload]
-    var currentUnderstanding: [String]
-    var acceptedDecisions: [String]
+    var currentUnderstanding: [StewardUnderstandingPayload]
+    var acceptedDecisions: [StewardDecisionPayload]
     var forbiddenDirections: [String]
-    var openIssues: [String]
 
     init(project: ProjectRecord) {
         id = project.id
         name = project.name
-        summary = project.context.currentSummary
-        purpose = project.context.purpose
+        summary = boundedText(project.context.currentSummary, limit: 4_000)
+        purpose = boundedText(project.context.purpose, limit: 2_000)
         status = project.status.rawValue
-        activeWorklines = project.activeTasks.map(WorklinePayload.init)
-        currentUnderstanding = project.context.understanding.map(\.text)
-        acceptedDecisions = project.context.acceptedDecisions.map(\.text)
-        forbiddenDirections = project.context.forbiddenDirections
-        openIssues = project.context.openIssues
+        activeWorklines = project.activeTasks.prefix(20).map(WorklinePayload.init)
+        currentUnderstanding = project.context.understanding.prefix(50).map(StewardUnderstandingPayload.init)
+        acceptedDecisions = project.context.acceptedDecisions.prefix(50).map(StewardDecisionPayload.init)
+        forbiddenDirections = project.context.forbiddenDirections.prefix(30).map {
+            boundedText($0, limit: 1_000)
+        }
     }
 }
 
@@ -1074,8 +1636,8 @@ private struct WorklinePayload: Codable {
 
     init(task: TaskRecord) {
         id = task.id
-        title = task.title
-        objective = task.objective
+        title = boundedText(task.title, limit: 300)
+        objective = boundedText(task.objective, limit: 2_000)
         status = task.status.rawValue
         stage = task.currentStage.rawValue
     }
@@ -1088,8 +1650,8 @@ private struct DeltaPayload: Codable {
     var timestamp: Date
 
     init(event: ProjectEvent) {
-        title = event.title
-        summary = event.summary
+        title = boundedText(event.title, limit: 300)
+        summary = boundedText(event.summary, limit: 2_000)
         kind = event.kind.rawValue
         timestamp = event.timestamp
     }
@@ -1099,6 +1661,7 @@ private struct RuntimeEnvelope<Result: Codable>: Codable {
     var mode: String
     var runtimeThreadId: String
     var usage: AgentUsage?
+    var telemetry: AgentRunTelemetry?
     var result: Result
 }
 
@@ -1116,27 +1679,43 @@ private struct AgentUsage: Codable, Equatable {
     }
 }
 
+private struct AgentRunTelemetry: Codable, Equatable {
+    var model: String
+    var reasoning: String
+    var promptBytes: Int
+    var durationMilliseconds: Int
+    var codexProcessID: Int32
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case reasoning
+        case promptBytes = "prompt_bytes"
+        case durationMilliseconds = "duration_ms"
+        case codexProcessID = "codex_pid"
+    }
+}
+
 private struct AgentRunRecord: Codable {
     var timestamp: Date
     var mode: String
     var segmentID: String
     var runtimeThreadID: String
     var usage: AgentUsage?
+    var telemetry: AgentRunTelemetry?
 }
 
-private struct AgentDecisionRecord<Result: Encodable>: Encodable {
+private struct AgentUsageJournalRecord: Codable {
     var timestamp: Date
-    var mode: String
-    var segmentID: String
-    var runtimeThreadID: String
-    var result: Result
+    var usage: AgentUsage?
 }
+
 
 public enum AgentRuntimeError: LocalizedError {
     case missingNode(String)
     case missingRuntime(String)
     case failed(String)
     case timedOut(Int)
+    case busy
 
     public var errorDescription: String? {
         switch self {
@@ -1144,6 +1723,7 @@ public enum AgentRuntimeError: LocalizedError {
         case .missingRuntime(let path): "Workstate Agent Runtime not found at \(path)"
         case .failed(let message): "Workstate Agent Runtime failed: \(message)"
         case .timedOut(let seconds): "Workstate Agent Runtime timed out after \(seconds) seconds"
+        case .busy: "Another Workstate Agent batch is already running"
         }
     }
 }

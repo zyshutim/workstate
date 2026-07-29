@@ -41,8 +41,8 @@ struct WorkstateRebuild {
         let rebuildRoot = WorkstatePaths.defaultPaths().root.appendingPathComponent("rebuild", isDirectory: true)
         try FileManager.default.createDirectory(at: rebuildRoot, withIntermediateDirectories: true)
         let evidenceURL = rebuildRoot.appendingPathComponent("\(projectID)-evidence.jsonl")
-        let distillationURL = rebuildRoot.appendingPathComponent("\(projectID)-distilled.jsonl")
-        let proposalURL = rebuildRoot.appendingPathComponent("\(projectID)-proposal.json")
+        let distillationURL = rebuildRoot.appendingPathComponent("\(projectID)-v3-distilled.jsonl")
+        let proposalURL = rebuildRoot.appendingPathComponent("\(projectID)-v3-proposal.json")
         let sessionURLs = try threadIDs.map(findSession(threadID:))
         try extractEvidence(from: sessionURLs, to: evidenceURL)
 
@@ -57,7 +57,7 @@ struct WorkstateRebuild {
         let runtime = AgentRuntimeClient()
         let existing = try readDistillations(distillationURL)
         var distilledByIndex: [Int: RebuildDistilledChunk] = [:]
-        for chunk in existing where chunk.schemaVersion == 2 && chunk.chunkCount == chunks.count && chunk.chunkIndex < chunks.count {
+        for chunk in existing where chunk.schemaVersion == 3 && chunk.chunkCount == chunks.count && chunk.chunkIndex < chunks.count {
             guard chunk.evidenceIds == chunks[chunk.chunkIndex].map(\.id) else { continue }
             distilledByIndex[chunk.chunkIndex] = chunk
         }
@@ -116,7 +116,7 @@ struct WorkstateRebuild {
         )
         let proposalURL = URL(
             fileURLWithPath: arguments.value("proposal")
-                ?? rebuildRoot.appendingPathComponent("\(projectID)-proposal.json").path
+                ?? rebuildRoot.appendingPathComponent("\(projectID)-v3-proposal.json").path
         )
         let proposal = try JSONDecoder().decode(
             ProjectRebuildProposal.self,

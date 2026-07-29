@@ -3,7 +3,7 @@ import SwiftUI
 
 public struct WorkstateRootView: View {
     @ObservedObject private var model: WorkstateViewModel
-    private let refreshTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     public init(model: WorkstateViewModel) {
         self.model = model

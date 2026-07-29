@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WorkstateCore
+import WorkstateIngestion
 
 enum ProjectWorkspacePage: Hashable {
     case progress
@@ -111,7 +112,7 @@ extension ProjectTopic {
     }
 }
 
-private struct ProjectTopicOriginalStatement: Identifiable {
+private struct ProjectTopicOriginalStatement: Identifiable, Sendable {
     let id: String
     let text: String
     let source: String
@@ -195,6 +196,10 @@ struct ProjectTopicsPage: View {
                         ownerConversation: ownerConversation,
                         sources: sources
                     ),
+                    sourceReferences: sources.filter {
+                        Set(selectedTopic.sourceIDs + selectedTopic.notes.flatMap(\.sourceIDs))
+                            .contains($0.id)
+                    },
                     accent: project.accent.color,
                     onDiscuss: { onDiscussTopic(selectedTopic.id) },
                     onPromote: { kind, title, detail in
@@ -387,6 +392,7 @@ private struct TopicRow: View {
 private struct ProjectTopicDetail: View {
     let topic: ProjectTopic
     let originalStatements: [ProjectTopicOriginalStatement]
+    let sourceReferences: [SourceReference]
     let accent: Color
     let onDiscuss: () -> Void
     let onPromote: (ProjectTopicPromotionKind, String, String) -> Void
@@ -394,6 +400,7 @@ private struct ProjectTopicDetail: View {
     @Environment(\.workstateSnapshotRendering) private var snapshotRendering
     @State private var isPromotionPresented = false
     @State private var isCancelConfirmationPresented = false
+    @State private var resolvedSourceStatements: [ProjectTopicOriginalStatement] = []
 
     var body: some View {
         Group {
@@ -410,9 +417,30 @@ private struct ProjectTopicDetail: View {
             }
         }
         .sheet(isPresented: $isPromotionPresented) {
-            TopicPromotionSheet(topic: topic, originalStatements: originalStatements) { kind, title, detail in
+            TopicPromotionSheet(topic: topic, originalStatements: displayedStatements) { kind, title, detail in
                 onPromote(kind, title, detail)
                 isPromotionPresented = false
+            }
+        }
+        .task(id: topic.id) {
+            let sources = sourceReferences.filter { $0.kind == "conversation" && $0.excerpt.isEmpty }
+            do {
+                resolvedSourceStatements = try await Task.detached {
+                    let scanner = CodexSessionScanner()
+                    return try sources.flatMap { source in
+                        try scanner.resolveMessages(for: source).compactMap { message in
+                            guard message.role.lowercased() == "user" else { return nil }
+                            return ProjectTopicOriginalStatement(
+                                id: "source-\(source.id)-\(message.id)",
+                                text: message.text,
+                                source: source.label,
+                                timestamp: message.timestamp
+                            )
+                        }
+                    }
+                }.value
+            } catch {
+                resolvedSourceStatements = []
             }
         }
     }
@@ -424,7 +452,7 @@ private struct ProjectTopicDetail: View {
                 Divider()
 
                 TopicDetailSection(title: "你的原话", systemImage: "quote.opening") {
-                    OriginalStatementReview(statements: originalStatements)
+                    OriginalStatementReview(statements: displayedStatements)
                 }
 
                 TopicDetailSection(title: "当前理解", systemImage: "text.book.closed") {
@@ -606,6 +634,13 @@ private struct ProjectTopicDetail: View {
                 onResolve(.cancelled)
             }
         }
+    }
+
+    private var displayedStatements: [ProjectTopicOriginalStatement] {
+        var seen = Set<String>()
+        return (originalStatements + resolvedSourceStatements)
+            .filter { seen.insert($0.text.trimmingCharacters(in: .whitespacesAndNewlines)).inserted }
+            .sorted { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
     }
 }
 

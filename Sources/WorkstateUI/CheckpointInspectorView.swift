@@ -126,7 +126,7 @@ struct EventDetailPopover: View {
                 .foregroundStyle(WorkstateTheme.secondaryLabel)
 
             ForEach(resolvedSources) { source in
-                if !source.excerpt.isEmpty {
+                if source.kind == "conversation" {
                     ConversationEvidence(source: source)
                         .padding(.bottom, 8)
                 }

@@ -6,7 +6,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@openai/codex-sdk": "0.144.5"
+    "@openai/codex": "0.144.5"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

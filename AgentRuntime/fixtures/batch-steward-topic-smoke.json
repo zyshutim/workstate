@@ -1,0 +1,33 @@
+{
+  "mode": "batch_steward",
+  "profile": {
+    "model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "segments": [
+    {
+      "id": "smoke:topic-turn",
+      "threadID": "smoke-topic",
+      "turnID": "topic-turn",
+      "sourcePath": "/tmp/smoke-topic.jsonl",
+      "cwd": "/Users/demo/Documents/Workstate",
+      "userText": "以后也许增加手机入口，但现在先不做，后面再讨论。",
+      "assistantText": "记录为未来议题，目前不进入开发。",
+      "timestamp": "2026-07-24T06:00:00Z"
+    }
+  ],
+  "project": {
+    "id": "workstate",
+    "name": "Workstate",
+    "summary": "本地项目工作记忆工具",
+    "purpose": "维护跨会话项目认知",
+    "status": "active",
+    "focusedWorklineId": "",
+    "activeWorklines": [],
+    "currentUnderstanding": [],
+    "acceptedDecisions": [],
+    "forbiddenDirections": [],
+    "recentDeltas": [],
+    "topics": []
+  }
+}

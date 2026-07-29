@@ -11,7 +11,7 @@ public struct ProjectRebuildProposal: Codable, Equatable, Sendable {
     public var understanding: [RebuildUnderstanding]
     public var acceptedDecisions: [RebuildDecision]
     public var forbiddenDirections: [RebuildStatement]
-    public var openIssues: [RebuildStatement]
+    public var topics: [RebuildTopic]
     public var worklines: [RebuildWorkline]
     public var deltas: [RebuildDelta]
 
@@ -26,7 +26,7 @@ public struct ProjectRebuildProposal: Codable, Equatable, Sendable {
         understanding: [RebuildUnderstanding],
         acceptedDecisions: [RebuildDecision],
         forbiddenDirections: [RebuildStatement],
-        openIssues: [RebuildStatement],
+        topics: [RebuildTopic],
         worklines: [RebuildWorkline],
         deltas: [RebuildDelta]
     ) {
@@ -40,7 +40,7 @@ public struct ProjectRebuildProposal: Codable, Equatable, Sendable {
         self.understanding = understanding
         self.acceptedDecisions = acceptedDecisions
         self.forbiddenDirections = forbiddenDirections
-        self.openIssues = openIssues
+        self.topics = topics
         self.worklines = worklines
         self.deltas = deltas
     }
@@ -76,6 +76,46 @@ public struct RebuildDecision: Codable, Equatable, Sendable {
     public init(text: String, rationale: String, evidenceIds: [String]) {
         self.text = text
         self.rationale = rationale
+        self.evidenceIds = evidenceIds
+    }
+}
+
+public struct RebuildTopic: Codable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var summary: String
+    public var kind: String
+    public var disposition: String
+    public var currentUnderstanding: String
+    public var proposedDirection: String
+    public var deferredReason: String
+    public var revisitTrigger: String
+    public var openQuestions: [String]
+    public var evidenceIds: [String]
+
+    public init(
+        id: String,
+        title: String,
+        summary: String,
+        kind: String,
+        disposition: String,
+        currentUnderstanding: String,
+        proposedDirection: String,
+        deferredReason: String,
+        revisitTrigger: String,
+        openQuestions: [String],
+        evidenceIds: [String]
+    ) {
+        self.id = id
+        self.title = title
+        self.summary = summary
+        self.kind = kind
+        self.disposition = disposition
+        self.currentUnderstanding = currentUnderstanding
+        self.proposedDirection = proposedDirection
+        self.deferredReason = deferredReason
+        self.revisitTrigger = revisitTrigger
+        self.openQuestions = openQuestions
         self.evidenceIds = evidenceIds
     }
 }

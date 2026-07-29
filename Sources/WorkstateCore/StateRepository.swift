@@ -122,7 +122,11 @@ public struct WorkstateRepository: Sendable {
         try ensureInitialized()
         return try withLock(exclusive: true) {
             var snapshot = try loadUnlocked()
+            let original = snapshot
             try mutate(&snapshot)
+            guard snapshot != original else {
+                return original
+            }
             snapshot.updatedAt = mutation.timestamp
             try validate(snapshot)
             try writeUnlocked(snapshot)
@@ -160,6 +164,17 @@ public struct WorkstateRepository: Sendable {
     private func appendMutationUnlocked(_ mutation: WorkspaceMutation) throws {
         var data = try WorkstateCoding.makeEncoder(pretty: false).encode(mutation)
         data.append(0x0A)
+        let maximumLogBytes: UInt64 = 4 * 1024 * 1024
+        let currentBytes = ((try? FileManager.default.attributesOfItem(
+            atPath: paths.events.path
+        )[.size]) as? NSNumber)?.uint64Value ?? 0
+        if currentBytes > 0, currentBytes + UInt64(data.count) > maximumLogBytes {
+            let previous = paths.root.appendingPathComponent("events.previous.jsonl")
+            if FileManager.default.fileExists(atPath: previous.path) {
+                try FileManager.default.removeItem(at: previous)
+            }
+            try FileManager.default.moveItem(at: paths.events, to: previous)
+        }
         if !FileManager.default.fileExists(atPath: paths.events.path) {
             FileManager.default.createFile(atPath: paths.events.path, contents: nil)
         }
@@ -304,7 +319,6 @@ public struct WorkstateRepository: Sendable {
                 context["objectModel"] = context["objectModel"] ?? []
                 context["acceptedDecisions"] = context["acceptedDecisions"] ?? []
                 context["forbiddenDirections"] = context["forbiddenDirections"] ?? []
-                context["openIssues"] = context["openIssues"] ?? []
                 projects[index]["context"] = context
             }
             root["projects"] = projects

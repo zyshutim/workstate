@@ -36,7 +36,6 @@ public struct ContextSnapshotProject: Codable, Equatable, Sendable {
     public var understanding: [String]
     public var acceptedDecisions: [String]
     public var forbiddenDirections: [String]
-    public var openIssues: [String]
 }
 
 public struct ContextSnapshotDelta: Codable, Equatable, Identifiable, Sendable {
@@ -73,6 +72,31 @@ public struct ContextSourcePointer: Codable, Equatable, Identifiable, Sendable {
     public var turnIDs: [String]
 }
 
+public struct ContextSnapshotSemanticBundle: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var summary: String
+    public var threadID: String
+    public var turnIDs: [String]
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        title: String,
+        summary: String,
+        threadID: String,
+        turnIDs: [String],
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.title = title
+        self.summary = summary
+        self.threadID = threadID
+        self.turnIDs = turnIDs
+        self.updatedAt = updatedAt
+    }
+}
+
 public struct ContextSnapshot: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var generatedAt: Date
@@ -81,6 +105,7 @@ public struct ContextSnapshot: Codable, Equatable, Sendable {
     public var project: ContextSnapshotProject
     public var worklines: [ContextSnapshotWorkline]
     public var openTopics: [ProjectTopic]
+    public var openSemanticBundles: [ContextSnapshotSemanticBundle]
     public var collaborationGuidance: [String]
     public var sources: [ContextSourcePointer]
 
@@ -92,6 +117,7 @@ public struct ContextSnapshot: Codable, Equatable, Sendable {
         project: ContextSnapshotProject,
         worklines: [ContextSnapshotWorkline],
         openTopics: [ProjectTopic],
+        openSemanticBundles: [ContextSnapshotSemanticBundle] = [],
         collaborationGuidance: [String] = [],
         sources: [ContextSourcePointer]
     ) {
@@ -102,6 +128,7 @@ public struct ContextSnapshot: Codable, Equatable, Sendable {
         self.project = project
         self.worklines = worklines
         self.openTopics = openTopics
+        self.openSemanticBundles = openSemanticBundles
         self.collaborationGuidance = collaborationGuidance
         self.sources = sources
     }
@@ -270,8 +297,7 @@ public struct ContextSnapshotBuilder: Sendable {
                     .filter { $0.status == .confirmed }
                     .map(\.text)
                 ),
-                forbiddenDirections: unique(project.context.forbiddenDirections),
-                openIssues: Array(unique(project.context.openIssues).suffix(12))
+                forbiddenDirections: unique(project.context.forbiddenDirections)
             ),
             worklines: worklines,
             openTopics: openTopics,
@@ -342,7 +368,6 @@ public struct ContextSnapshotMarkdownRenderer: Sendable {
         appendSection("已确认的理解", values: snapshot.project.understanding, to: &lines)
         appendSection("已确认的决定", values: snapshot.project.acceptedDecisions, to: &lines)
         appendSection("禁止方向", values: snapshot.project.forbiddenDirections, to: &lines)
-        appendSection("未决问题", values: snapshot.project.openIssues, to: &lines)
 
         if !snapshot.worklines.isEmpty {
             lines.append(contentsOf: ["", "## 当前工作"])
@@ -366,6 +391,15 @@ public struct ContextSnapshotMarkdownRenderer: Sendable {
                     ? "待验证"
                     : "待决策"
                 return "- [\(disposition)] \($0.title)：\($0.currentUnderstanding)"
+            })
+        }
+        if !snapshot.openSemanticBundles.isEmpty {
+            lines.append(contentsOf: ["", "## 尚未定性的对话"])
+            lines.append(contentsOf: snapshot.openSemanticBundles.map { bundle in
+                let turns = bundle.turnIDs.isEmpty
+                    ? ""
+                    : " · \(bundle.turnIDs.joined(separator: ", "))"
+                return "- \(bundle.title)：\(bundle.summary) · codex://threads/\(bundle.threadID)\(turns)"
             })
         }
         appendSection("协作方式", values: snapshot.collaborationGuidance, to: &lines)

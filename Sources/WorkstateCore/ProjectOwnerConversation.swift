@@ -79,6 +79,7 @@ public struct ProjectOwnerTurnRepository: Sendable {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        try rotateIfNeeded()
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
@@ -88,6 +89,16 @@ public struct ProjectOwnerTurnRepository: Sendable {
         defer { try? handle.close() }
         try handle.seekToEnd()
         try handle.write(contentsOf: data)
+    }
+
+    private func rotateIfNeeded(maximumBytes: Int = 2 * 1024 * 1024) throws {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size >= maximumBytes else { return }
+        let previous = url.deletingPathExtension().appendingPathExtension("previous.jsonl")
+        if FileManager.default.fileExists(atPath: previous.path) {
+            try FileManager.default.removeItem(at: previous)
+        }
+        try FileManager.default.moveItem(at: url, to: previous)
     }
 }
 

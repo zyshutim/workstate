@@ -97,7 +97,6 @@ public struct ReviewEventProposal: Codable, Equatable, Sendable {
     public var stage: LoopStage
     public var delivery: DeliveryStage
     public var facts: [String]
-    public var openIssues: [String]
     public var operations: OperationalContext
 
     public init(
@@ -108,7 +107,6 @@ public struct ReviewEventProposal: Codable, Equatable, Sendable {
         stage: LoopStage,
         delivery: DeliveryStage,
         facts: [String] = [],
-        openIssues: [String] = [],
         operations: OperationalContext = .init()
     ) {
         self.eventID = eventID
@@ -118,7 +116,6 @@ public struct ReviewEventProposal: Codable, Equatable, Sendable {
         self.stage = stage
         self.delivery = delivery
         self.facts = facts
-        self.openIssues = openIssues
         self.operations = operations
     }
 }
@@ -395,7 +392,6 @@ public struct ProjectContext: Codable, Equatable, Sendable {
     public var objectModel: [String]
     public var acceptedDecisions: [DecisionRecord]
     public var forbiddenDirections: [String]
-    public var openIssues: [String]
 
     public init(
         currentSummary: String = "",
@@ -406,8 +402,7 @@ public struct ProjectContext: Codable, Equatable, Sendable {
         revisions: [ContextRevision] = [],
         objectModel: [String] = [],
         acceptedDecisions: [DecisionRecord] = [],
-        forbiddenDirections: [String] = [],
-        openIssues: [String] = []
+        forbiddenDirections: [String] = []
     ) {
         self.currentSummary = currentSummary
         self.purpose = purpose
@@ -418,7 +413,6 @@ public struct ProjectContext: Codable, Equatable, Sendable {
         self.objectModel = objectModel
         self.acceptedDecisions = acceptedDecisions
         self.forbiddenDirections = forbiddenDirections
-        self.openIssues = openIssues
     }
 }
 
@@ -639,6 +633,10 @@ public struct SourceReference: Codable, Equatable, Identifiable, Sendable {
     public var turnIDs: [String]
     public var excerpt: [ConversationMessage]
     public var contentHash: String
+    public var provider: String?
+    public var startOffset: UInt64?
+    public var endOffset: UInt64?
+    public var messageSpans: [ConversationSourceSpan]?
 
     public init(
         id: String = UUID().uuidString.lowercased(),
@@ -648,7 +646,11 @@ public struct SourceReference: Codable, Equatable, Identifiable, Sendable {
         threadID: String = "",
         turnIDs: [String] = [],
         excerpt: [ConversationMessage] = [],
-        contentHash: String = ""
+        contentHash: String = "",
+        provider: String? = nil,
+        startOffset: UInt64? = nil,
+        endOffset: UInt64? = nil,
+        messageSpans: [ConversationSourceSpan]? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -658,6 +660,10 @@ public struct SourceReference: Codable, Equatable, Identifiable, Sendable {
         self.turnIDs = turnIDs
         self.excerpt = excerpt
         self.contentHash = contentHash
+        self.provider = provider
+        self.startOffset = startOffset
+        self.endOffset = endOffset
+        self.messageSpans = messageSpans
     }
 }
 

@@ -61,10 +61,45 @@ struct WorkstateCLI {
         case "handoff":
             let scope = try arguments.requiredPositional(at: 0, name: "project|task|thread")
             let id = try arguments.requiredPositional(at: 1, name: "\(scope)-id")
-            let snapshot: ContextSnapshot
-            let guidance = (try? CollaborationProfileRepository(
+            let workspace = try service.snapshot()
+            let targetProjectID: String
+            switch scope {
+            case "project":
+                targetProjectID = id
+            case "task":
+                guard let project = workspace.projects.first(where: {
+                    $0.tasks.contains(where: { $0.id == id })
+                }) else {
+                    throw WorkstateStorageError.missingTask(id)
+                }
+                targetProjectID = project.id
+            case "thread":
+                guard let binding = try CodexSessionScanner().routeBinding(threadID: id) else {
+                    throw CLIError.invalidOption("Thread has no Workstate project route: \(id)")
+                }
+                targetProjectID = binding.projectID
+            default:
+                throw CLIError.invalidOption("Handoff scope must be project, task, or thread")
+            }
+            let handoffCoordinator = ConversationBatchCoordinator()
+            _ = try handoffCoordinator.recoverInterruptedBatches()
+            _ = try handoffCoordinator.scanAll()
+            _ = try handoffCoordinator.process(
+                trigger: .handoff,
+                projectID: targetProjectID
+            )
+            var snapshot: ContextSnapshot
+            let profileGuidance = (try? CollaborationProfileRepository(
                 root: repository.paths.root
             ).load().activeGuidance) ?? []
+            let memoryGuidance = (try? DurableMemoryRepository(root: repository.paths.root)
+                .retrieve(
+                    DurableMemorySelection()
+                )
+                .flatMap(\.entries)
+                .filter { $0.lifecycle == .active || $0.lifecycle == .prohibited }
+                .map(\.text)) ?? []
+            let guidance = Array(Set(profileGuidance + memoryGuidance)).sorted()
             switch scope {
             case "project":
                 snapshot = try service.contextSnapshot(
@@ -77,17 +112,33 @@ struct WorkstateCLI {
                     collaborationGuidance: guidance
                 )
             case "thread":
-                guard let binding = try CodexSessionScanner().routeBinding(threadID: id) else {
-                    throw CLIError.invalidOption("Thread has no Workstate project route: \(id)")
-                }
                 snapshot = try service.contextSnapshot(
                     threadID: id,
-                    projectID: binding.projectID,
+                    projectID: targetProjectID,
                     collaborationGuidance: guidance
                 )
             default:
                 throw CLIError.invalidOption("Handoff scope must be project, task, or thread")
             }
+            snapshot.openSemanticBundles = try CodexSessionScanner(
+                runtimeRoot: repository.paths.root
+            ).openSemanticBundles()
+                .filter {
+                    $0.projectID == targetProjectID
+                        && (scope != "thread" || $0.threadID == id)
+                }
+                .map {
+                    ContextSnapshotSemanticBundle(
+                        id: $0.id,
+                        title: $0.title,
+                        summary: $0.summary,
+                        threadID: $0.threadID,
+                        turnIDs: $0.evidenceIDs.compactMap { evidenceID in
+                            evidenceID.split(separator: ":", maxSplits: 1).last.map(String.init)
+                        },
+                        updatedAt: $0.updatedAt
+                    )
+                }
             switch arguments.value("format") ?? "markdown" {
             case "markdown":
                 print(ContextSnapshotMarkdownRenderer().render(snapshot), terminator: "")
@@ -175,8 +226,7 @@ struct WorkstateCLI {
                     purpose: arguments.value("purpose"),
                     objectModel: arguments.optionalValues("object"),
                     acceptedDecisions: decisions,
-                    forbiddenDirections: arguments.optionalValues("forbidden"),
-                    openIssues: arguments.optionalValues("issue")
+                    forbiddenDirections: arguments.optionalValues("forbidden")
                 )
             )
             try printJSON(service.compactProject(projectID: id))
@@ -327,6 +377,10 @@ struct WorkstateCLI {
             _ = try service.reviseContext(input)
             try printJSON(service.compactProject(projectID: input.projectID))
         case "brief-compose":
+            let briefCoordinator = ConversationBatchCoordinator()
+            _ = try briefCoordinator.recoverInterruptedBatches()
+            _ = try briefCoordinator.scanAll()
+            _ = try briefCoordinator.process(trigger: .dailyBrief)
             let composer = BriefCompositionService()
             guard let brief = try composer.refreshLatest(
                 workspace: service.snapshot(),
@@ -335,6 +389,24 @@ struct WorkstateCLI {
                 throw CLIError.invalidOption("No activity brief is available to compose")
             }
             try printJSON(brief)
+        case "sync":
+            let coordinator = ConversationBatchCoordinator()
+            _ = try coordinator.recoverInterruptedBatches()
+            let pending = try coordinator.scanAll()
+            let result = try coordinator.process(
+                trigger: .manual,
+                threadID: arguments.value("thread")
+            )
+            try printJSON(
+                ManualSyncOutput(
+                    discovered: pending.pointerCount,
+                    processed: result?.summary.processed ?? 0,
+                    changed: result?.summary.changed ?? 0,
+                    ignored: result?.summary.ignored ?? 0,
+                    failed: result?.failedPointerCount ?? 0,
+                    agentRuns: result?.summary.agentRuns ?? 0
+                )
+            )
         case "monitoring-repair":
             let settings = try WorkstateSettingsRepository().load(
                 workspaceHasProjects: !service.snapshot().projects.isEmpty
@@ -355,6 +427,24 @@ struct WorkstateCLI {
             }
             try scanner.requeue(segmentIDs: ids)
             try printJSON(MonitoringRetryOutput(requeued: ids.count))
+        case "source-retry":
+            let threadID = try arguments.required("thread")
+            let turnIDs = arguments.values("turn")
+            guard !turnIDs.isEmpty else {
+                throw CLIError.invalidOption("source-retry requires at least one --turn")
+            }
+            let index = try ConversationSourceIndex(
+                databaseURL: repository.paths.root
+                    .appendingPathComponent("conversation-source-index.sqlite")
+            )
+            let requeued = try index.requeueFailedPointers(turnIDs.map {
+                ConversationSourcePointerID(
+                    provider: "codex",
+                    threadID: threadID,
+                    turnID: $0
+                )
+            })
+            try printJSON(SourceRetryOutput(threadID: threadID, requeued: requeued))
         case "collaboration-profile-import":
             let path = try arguments.requiredPositional(at: 0, name: "profile-json")
             let profile = try WorkstateCoding.makeDecoder().decode(
@@ -431,16 +521,16 @@ struct WorkstateCLI {
                     timestamp: timestamp.addingTimeInterval(1)
                 )
             ]
-            let decisions = try runtime.stewardBatch(
+            let batch = try runtime.stewardBatch(
                 segments: segments,
                 project: project,
                 scanner: CodexSessionScanner(runtimeRoot: repository.paths.root)
             )
             try printJSON(
                 AgentWorklineSmokeOutput(
-                    decisionCount: decisions.count,
-                    actions: decisions.map(\.result.worklineAction),
-                    closureDispositions: decisions.map {
+                    changeCount: batch.changes.count,
+                    actions: batch.changes.map(\.result.worklineAction),
+                    closureDispositions: batch.changes.map {
                         $0.result.closureDisposition ?? ""
                     }
                 )
@@ -494,8 +584,10 @@ struct WorkstateCLI {
               workstate home
 
             Write:
+              workstate sync [--thread ID]
               workstate brief-compose [--force]
               workstate monitoring-repair
+              workstate source-retry --thread ID --turn ID [--turn ID]
               workstate collaboration-profile-import <profile-json>
               workstate workline-reconcile <reconciliation-json>
               workstate source --id ID --kind KIND --label TEXT --locator PATH [--thread ID] [--turn ID] [--user TEXT] [--assistant TEXT] [--hash VALUE]
@@ -518,6 +610,20 @@ private struct MonitoringRepairOutput: Codable {
     var discarded: Int
 }
 
+private struct SourceRetryOutput: Codable {
+    var threadID: String
+    var requeued: Int
+}
+
+private struct ManualSyncOutput: Codable {
+    var discovered: Int
+    var processed: Int
+    var changed: Int
+    var ignored: Int
+    var failed: Int
+    var agentRuns: Int
+}
+
 private struct MonitoringRetryOutput: Codable {
     var requeued: Int
 }
@@ -529,7 +635,7 @@ private struct AgentSmokeOutput: Codable {
 }
 
 private struct AgentWorklineSmokeOutput: Codable {
-    var decisionCount: Int
+    var changeCount: Int
     var actions: [String]
     var closureDispositions: [String]
 }

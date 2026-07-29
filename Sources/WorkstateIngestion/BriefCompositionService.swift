@@ -36,17 +36,21 @@ public struct BriefCompositionService: Sendable {
     }
 
     @discardableResult
-    public func refreshPreviousDay(
+    public func refreshPreviousActivityDay(
         workspace: WorkspaceSnapshot,
         now: Date = Date(),
         calendar: Calendar = .current,
         force: Bool = false
     ) throws -> DailyBrief? {
         let today = calendar.startOfDay(for: now)
-        guard let previousDay = calendar.date(byAdding: .day, value: -1, to: today) else {
-            throw WorkstateStorageError.invalidState("Could not resolve the previous activity day")
-        }
-        let components = calendar.dateComponents([.year, .month, .day], from: previousDay)
+        let activityDays = try DailyBriefBuilder(calendar: calendar)
+            .activityDays(in: workspace, through: now)
+            .filter { $0 < today }
+        guard let previousActivityDay = activityDays.last else { return nil }
+        let components = calendar.dateComponents(
+            [.year, .month, .day],
+            from: previousActivityDay
+        )
         let dateKey = String(
             format: "%04d-%02d-%02d",
             components.year ?? 0,
@@ -59,7 +63,7 @@ public struct BriefCompositionService: Sendable {
             return existing
         }
         let brief = try repository.brief(
-            for: previousDay,
+            for: previousActivityDay,
             workspace: workspace,
             calendar: calendar,
             includeCurrentState: true

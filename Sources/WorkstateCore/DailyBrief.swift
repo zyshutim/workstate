@@ -364,14 +364,19 @@ public struct DailyBriefBuilder: Sendable {
         )
 
         let unresolved: [DailyBriefItem] = includeCurrentState
-            ? project.context.openIssues.prefix(4).enumerated().map { index, issue in
+            ? project.topics
+                .filter { $0.status == .captured || $0.status == .discussing }
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .prefix(4)
+                .map { topic in
                 DailyBriefItem(
-                    id: "unresolved:\(project.id):\(index):\(stableComponent(issue))",
+                    id: "unresolved:\(project.id):\(topic.id)",
                     kind: .unresolved,
-                    title: issue,
-                    detail: "仍需继续确认或处理",
+                    title: topic.title,
+                    detail: topic.currentUnderstanding,
+                    timestamp: topic.updatedAt,
                     projectID: project.id,
-                    sourceIDs: project.sourceIDs
+                    sourceIDs: topic.sourceIDs
                 )
             }
             : []
@@ -450,10 +455,6 @@ public struct DailyBriefBuilder: Sendable {
         )
     }
 
-    private func stableComponent(_ value: String) -> String {
-        let digest = SHA256.hash(data: Data(value.utf8))
-        return digest.prefix(6).map { String(format: "%02x", $0) }.joined()
-    }
 }
 
 public struct DailyBriefRepository: Sendable {

@@ -237,7 +237,16 @@ struct WorkstateSnapshot {
                     parentEventIDs: ["daily-event-driven-ingestion"]
                 )
             ])
-            snapshot.projects[index].context.openIssues = ["完成真实前台 canary 后再恢复后台服务"]
+            snapshot.projects[index].topics.append(
+                ProjectTopic(
+                    id: "daily-foreground-canary",
+                    title: "完成真实前台 canary",
+                    summary: "恢复后台服务前需要完成真实前台验证。",
+                    disposition: .awaitingVerification,
+                    currentUnderstanding: "后台保持关闭，等待真实前台验证。",
+                    updatedAt: evening
+                )
+            )
             snapshot.projects[index].updatedAt = evening
             snapshot.projects[index].lastActivityAt = evening
         }
@@ -251,7 +260,6 @@ struct WorkstateSnapshot {
                 completed.completedAt = beforeInterval
                 return completed
             }
-            snapshot.projects[index].context.openIssues = []
             snapshot.projects[index].events.append(
                 ProjectEvent(
                     id: "daily-brief-direction",

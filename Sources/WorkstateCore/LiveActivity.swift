@@ -1,5 +1,10 @@
 import Foundation
 
+public enum LiveActivityPhase: String, Codable, Equatable, Sendable {
+    case active
+    case waitingForOwner
+}
+
 public struct LiveProjectActivity: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var projectID: String
@@ -7,6 +12,7 @@ public struct LiveProjectActivity: Codable, Equatable, Identifiable, Sendable {
     public var turnID: String
     public var title: String
     public var updatedAt: Date
+    public var phase: LiveActivityPhase
 
     public init(
         id: String,
@@ -14,7 +20,8 @@ public struct LiveProjectActivity: Codable, Equatable, Identifiable, Sendable {
         threadID: String,
         turnID: String,
         title: String,
-        updatedAt: Date
+        updatedAt: Date,
+        phase: LiveActivityPhase = .active
     ) {
         self.id = id
         self.projectID = projectID
@@ -22,6 +29,7 @@ public struct LiveProjectActivity: Codable, Equatable, Identifiable, Sendable {
         self.turnID = turnID
         self.title = title
         self.updatedAt = updatedAt
+        self.phase = phase
     }
 }
 

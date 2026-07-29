@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import WorkstateCore
 import WorkstateIngestion
@@ -14,18 +15,23 @@ struct WorkstateChecks {
         try collaborationRepositoriesRoundTrip()
         try collaborationInferenceCannotRewriteActiveProfile()
         try modelCatalogFiltersUnsupportedOptions()
+        try agentRuntimeStreamsRequestThroughStdin()
         try legacyStateMigration()
         try schemaV3Migration()
         try projectPositionUpdate()
         try projectModelReplacement()
         try contextSnapshotSelectsCurrentWork()
         try daemonStatusWritesOnlyOnChange()
+        try eventLogRotatesAtFixedBoundary()
         try dailyBriefProjectsVerifiedDailyState()
         try topicRequiresExplicitPromotion()
         try topicResolutionPreservesDisposition()
         try taskBranchAndMerge()
         try worklineReconciliationRepairsSemanticOwnership()
         try contextRevisionAuthority()
+        try ingestionBatchIsAtomicAndUpdatesProjectHead()
+        try ingestionBatchBranchesNewProjectFromHistoricalStart()
+        try ingestionFocusSwitchDoesNotCompletePreviousWorkline()
         try projectTimelineHierarchy()
         try projectTimelineParallelProjection()
         try projectTimelineSequentialWorkStaysOnMainline()
@@ -34,14 +40,32 @@ struct WorkstateChecks {
         try reviewResolutionAuthority()
         try projectUpdateReviewWritesEventOnConfirmation()
         try sessionScannerIncremental()
+        try sessionScannerMigratesLegacyActiveTurn()
+        try sessionScannerPreservesAllUserMessagesAcrossRestart()
         try sessionScannerReadsOnlyChangedFile()
+        try sessionScannerFastPollIgnoresDeletedFiles()
         try sessionScannerPreservesIncompleteLine()
         try sessionCatalogAndHistoryRangeImport()
+        try conversationSourceIndexFreezesBatchHighWaterMark()
+        try conversationBatchPolicyRequiresQuietOrExplicitTrigger()
+        try batchRouterExpandsSemanticPacketCoverage()
+        try conversationBatchesAreIsolatedByThread()
+        try conversationBatchCapsRouterTurns()
+        try conversationBatchQuarantinesOnlyUnreadablePointers()
+        try semanticBundlesWaitForCommitBeforeOwner()
+        try stewardReceivesOnlyActiveWorklines()
+        try largeConversationResolvesByMessageSpans()
+        try durableMemoryPersistsSelectiveDocuments()
         try monitoringCutoffDropsDisabledPeriod()
         try interruptedProcessingRecoversWithoutRepeatingCompletedStages()
-        try segmentProcessingIsIdempotent()
+        try interruptedBatchFailsWithoutModelRetry()
+        try semanticBundlesPersistRoutedEvidence()
+        try completedBatchMetadataIsPruned()
         try sessionWatcherReceivesFileChanges()
+        try sessionWatcherReceivesNestedFileAppend()
         try scannerMemoryRemainsBounded()
+        try previousActivityDaySkipsCalendarGaps()
+        try dailyBriefRunGateRunsOncePerDay()
         try liveActivityProjection()
         try projectRebuildAppliesVerifiedEvidence()
         try projectRebuildRejectsUnknownEvidence()
@@ -65,7 +89,8 @@ struct WorkstateChecks {
         let repository = WorkstateSettingsRepository(root: root)
         let initial = try repository.load(workspaceHasProjects: true)
         try require(initial.setupCompleted, "existing project workspace skips onboarding")
-        try require(initial.liveMonitoringStartedAt != nil, "existing workspace starts monitoring from now")
+        try require(!initial.liveMonitoringEnabled, "existing workspace does not start monitoring implicitly")
+        try require(initial.liveMonitoringStartedAt == nil, "disabled monitoring has no start time")
         try require(initial.profile(for: .route).modelID == "gpt-5.6-luna", "router default model")
 
         var updated = initial
@@ -77,6 +102,7 @@ struct WorkstateChecks {
         try require(loaded.profile(for: .brief).effort == .high, "agent effort persists")
 
         var legacy = initial
+        legacy.liveMonitoringEnabled = true
         legacy.liveMonitoringStartedAt = nil
         try repository.save(legacy)
         let fileDate = Date(timeIntervalSince1970: 1_784_619_029)
@@ -138,6 +164,87 @@ struct WorkstateChecks {
         try require(
             models[0].supportedEfforts == [.low, .medium],
             "catalog excludes max, ultra, and unsupported effort options"
+        )
+    }
+
+    private static func agentRuntimeStreamsRequestThroughStdin() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-agent-stdin-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: root))
+        try repository.ensureInitialized(initial: WorkspaceSnapshot())
+        _ = try WorkstateService(repository: repository).createProject(
+            ProjectCreateInput(
+                id: "workstate",
+                name: "Workstate",
+                summary: "Local project memory",
+                purpose: "Verify streamed Agent requests",
+                position: GraphPosition(x: 0, y: 0)
+            )
+        )
+        let runtimeScript = root.appendingPathComponent("fake-runtime.js")
+        let source = #"""
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", chunk => { input += chunk; });
+        process.stdin.on("end", () => {
+          const request = JSON.parse(input);
+          if (request.mode !== "route") process.exit(2);
+          process.stdout.write(JSON.stringify({
+            mode: "route",
+            runtimeThreadId: "ephemeral-run-test",
+            usage: null,
+            result: {
+              action: "select_project",
+              projectId: "workstate",
+              projectName: "Workstate",
+              projectSummary: "Local project memory",
+              disposition: "commit",
+              bundleId: "bundle-test",
+              bundleTitle: "Streamed request",
+              bundleSummary: "The request arrived through stdin",
+              signals: [{ type: "decision", authority: "observed", summary: "stdin works" }],
+              confidence: 1,
+              reason: "test"
+            }
+          }));
+        });
+        """#
+        try Data(source.utf8).write(to: runtimeScript, options: .atomic)
+        let nodePath = AgentRuntimeClient.defaultNodePath()
+        guard FileManager.default.isExecutableFile(atPath: nodePath) else {
+            throw CheckFailure.failed("Node executable for Agent stdin check")
+        }
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("sessions", isDirectory: true),
+            runtimeRoot: root
+        )
+        let runtime = AgentRuntimeClient(
+            runtimeScript: runtimeScript,
+            nodePath: nodePath,
+            runtimeRoot: root
+        )
+        let result = try runtime.route(
+            segment: SessionSegment(
+                threadID: "thread",
+                turnID: "turn",
+                sourcePath: "/tmp/source.jsonl",
+                startOffset: 0,
+                endOffset: 1,
+                cwd: "/tmp",
+                userText: "Route this through stdin",
+                assistantText: "Done",
+                timestamp: Date()
+            ),
+            workspace: try repository.load(),
+            scanner: scanner
+        )
+        try require(result.projectId == "workstate", "Swift streams Agent request through stdin")
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        try require(
+            !leftovers.contains(where: { $0.hasPrefix("agent-request-") }),
+            "Agent request is never copied to a temporary JSON file"
         )
     }
 
@@ -269,8 +376,7 @@ struct WorkstateChecks {
                     currentSummary: "Canonical HEAD",
                     objectModel: ["Project", "Workline", "Delta"],
                     acceptedDecisions: [DecisionRecord(text: "Confirmed decision", status: .confirmed)],
-                    forbiddenDirections: ["Do not infer acceptance"],
-                    openIssues: ["Verify runtime"]
+                    forbiddenDirections: ["Do not infer acceptance"]
                 )
             )
             let project = try service.snapshot().project(id: "reframe-multicam")
@@ -278,7 +384,6 @@ struct WorkstateChecks {
             try require(project?.context.objectModel == ["Project", "Workline", "Delta"], "project object model replacement")
             try require(project?.context.acceptedDecisions.first?.text == "Confirmed decision", "project accepted decisions replacement")
             try require(project?.context.forbiddenDirections == ["Do not infer acceptance"], "project forbidden directions replacement")
-            try require(project?.context.openIssues == ["Verify runtime"], "project open issues replacement")
         }
     }
 
@@ -335,6 +440,34 @@ struct WorkstateChecks {
         }
     }
 
+    private static func eventLogRotatesAtFixedBoundary() throws {
+        try withFixture { repository in
+            try repository.ensureInitialized(initial: WorkspaceSnapshot())
+            try Data(repeating: 0x61, count: 4 * 1024 * 1024).write(
+                to: repository.paths.events,
+                options: .atomic
+            )
+            _ = try WorkstateService(repository: repository).createProject(
+                ProjectCreateInput(
+                    id: "rotation-project",
+                    name: "Rotation",
+                    summary: "Verify bounded event storage",
+                    purpose: "Test log rotation",
+                    position: GraphPosition(x: 0, y: 0)
+                )
+            )
+            let previous = repository.paths.root.appendingPathComponent("events.previous.jsonl")
+            try require(
+                FileManager.default.fileExists(atPath: previous.path),
+                "event log keeps one rotated generation"
+            )
+            let currentSize = ((try FileManager.default.attributesOfItem(
+                atPath: repository.paths.events.path
+            )[.size]) as? NSNumber)?.intValue ?? Int.max
+            try require(currentSize < 1024 * 1024, "active event log restarts below its fixed boundary")
+        }
+    }
+
     private static func dailyBriefProjectsVerifiedDailyState() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
@@ -366,8 +499,7 @@ struct WorkstateChecks {
                         summary: "The final interaction is now authoritative",
                         status: .confirmed
                     )
-                ],
-                openIssues: ["Observe the foreground canary"]
+                ]
             ),
             tasks: [task],
             events: [
@@ -396,6 +528,16 @@ struct WorkstateChecks {
                     summary: "Polling is removed",
                     kind: .decision,
                     loopStage: .confirmation
+                )
+            ],
+            topics: [
+                ProjectTopic(
+                    id: "foreground-canary",
+                    title: "Observe the foreground canary",
+                    summary: "Verify the foreground result",
+                    disposition: .awaitingVerification,
+                    currentUnderstanding: "The foreground result is not verified",
+                    updatedAt: decisionTime
                 )
             ]
         )
@@ -719,8 +861,7 @@ struct WorkstateChecks {
                         kind: .verification,
                         stage: .verification,
                         delivery: .checked,
-                        facts: ["Check passed"],
-                        openIssues: ["Inspect runtime"]
+                        facts: ["Check passed"]
                     ),
                     sourceIDs: [source.id]
                 )
@@ -732,7 +873,6 @@ struct WorkstateChecks {
             let project = try service.snapshot().project(id: "reframe-multicam")
             try require(project?.event(id: "approved-delta")?.timestamp == eventDate, "confirmed update preserves event time")
             try require(project?.event(id: "approved-delta")?.delivery.stage == .checked, "confirmed update preserves delivery")
-            try require(project?.context.openIssues.contains("Inspect runtime") == true, "confirmed update appends open issue")
         }
     }
 
@@ -816,8 +956,9 @@ struct WorkstateChecks {
         try require(internalResult.isEmpty, "Workstate AgentRuntime sessions never enter project evidence")
         let scannerState = try scanner.loadState()
         try require(
-            scannerState.excludedThreadIDs.contains("agent-thread"),
-            "Workstate AgentRuntime thread is excluded"
+            !scannerState.excludedThreadIDs.contains("agent-thread")
+                && scannerState.cursors[internalSession.path] == nil,
+            "Workstate AgentRuntime metadata is not retained"
         )
 
         let guardianSession = sessions.appendingPathComponent("guardian.jsonl")
@@ -831,6 +972,185 @@ struct WorkstateChecks {
         try Data(guardian.utf8).write(to: guardianSession)
         let guardianResult = try scanner.scan()
         try require(guardianResult.isEmpty, "Codex subagent sessions never enter project evidence")
+    }
+
+    private static func sessionScannerMigratesLegacyActiveTurn() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-legacy-active-turn-check-\(UUID().uuidString)", isDirectory: true)
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+
+        let source = sessions.appendingPathComponent("rollout.jsonl")
+        let now = Date()
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"legacy-thread","cwd":"/tmp/project"}}
+
+        """
+        let started = """
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"legacy-turn"}}
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"Legacy unfinished request"}}
+
+        """
+        let initialData = Data((metadata + started).utf8)
+        try initialData.write(to: source)
+
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: runtime,
+            retainsLegacyPendingState: false
+        )
+        let state = IngestionSnapshot(
+            initialized: true,
+            cursors: [
+                source.path: SessionCursor(
+                    offset: UInt64(initialData.count),
+                    threadID: "legacy-thread",
+                    cwd: "/tmp/project",
+                    activeTurnID: "legacy-turn",
+                    activeTurnOffset: UInt64(Data(metadata.utf8).count),
+                    userText: "Legacy unfinished request",
+                    sourceSpans: nil,
+                    lastActivityAt: now,
+                    isInternalAgentSession: false
+                )
+            ],
+            lastScanAt: now
+        )
+        try WorkstateCoding.makeEncoder().encode(state).write(to: scanner.stateURL, options: .atomic)
+
+        let completion = """
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"legacy-turn","last_agent_message":"Legacy request completed"}}
+
+        """
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(completion.utf8))
+        try handle.close()
+
+        let captured = try scanner.scanChangedFiles([source.path])
+        try require(captured.count == 1, "legacy active turn completes once")
+        try require(
+            captured[0].sourceSpans?.map(\.kind) == [.userMessage, .assistantCompletion],
+            "legacy active turn recovers exact user and completion spans"
+        )
+
+        let index = try ConversationSourceIndex(databaseURL: scanner.sourceIndexURL)
+        let pointer = try index.pointer(
+            id: ConversationSourcePointerID(
+                provider: "codex",
+                threadID: "legacy-thread",
+                turnID: "legacy-turn"
+            )
+        )
+        try require(pointer != nil, "legacy active turn stores one source pointer")
+        let resolved = try scanner.segments(pointerRecords: [pointer!])
+        try require(
+            resolved.first?.userText == "Legacy unfinished request"
+                && resolved.first?.assistantText == "Legacy request completed",
+            "legacy active turn resolves from original source after migration"
+        )
+        let stateText = try String(contentsOf: scanner.stateURL, encoding: .utf8)
+        try require(
+            !stateText.contains("Legacy unfinished request"),
+            "legacy active turn raw text is removed after source spans are recovered"
+        )
+    }
+
+    private static func sessionScannerPreservesAllUserMessagesAcrossRestart() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-restarted-turn-check-\(UUID().uuidString)", isDirectory: true)
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let source = sessions.appendingPathComponent("rollout.jsonl")
+        let now = Date()
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"restart-thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: source)
+
+        let firstScanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: runtime,
+            retainsLegacyPendingState: false
+        )
+        _ = try firstScanner.scan()
+        let firstPart = """
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"restart-turn"}}
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"First request"}}
+
+        """
+        let firstHandle = try FileHandle(forWritingTo: source)
+        try firstHandle.seekToEnd()
+        try firstHandle.write(contentsOf: Data(firstPart.utf8))
+        try firstHandle.close()
+        _ = try firstScanner.scanChangedFiles([source.path])
+
+        let secondPart = """
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"Correction after restart"}}
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"restart-turn","last_agent_message":"Final answer"}}
+
+        """
+        let secondHandle = try FileHandle(forWritingTo: source)
+        try secondHandle.seekToEnd()
+        try secondHandle.write(contentsOf: Data(secondPart.utf8))
+        try secondHandle.close()
+
+        let restartedScanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: runtime,
+            retainsLegacyPendingState: false
+        )
+        let captured = try restartedScanner.scanChangedFiles([source.path])
+        try require(captured.count == 1, "a restarted scanner completes the active turn once")
+        try require(
+            captured[0].userText == "First request\n\nCorrection after restart",
+            "a restart does not drop user messages captured before it"
+        )
+        let index = try ConversationSourceIndex(databaseURL: restartedScanner.sourceIndexURL)
+        let pointer = try index.pointer(
+            id: ConversationSourcePointerID(
+                provider: "codex",
+                threadID: "restart-thread",
+                turnID: "restart-turn"
+            )
+        )
+        let resolved = try restartedScanner.segments(pointerRecords: [pointer!])
+        try require(
+            resolved.first?.userText == "First request\n\nCorrection after restart",
+            "the stored pointer hash covers every user message after a restart"
+        )
+
+        var legacyPointer = pointer!.pointer
+        let legacyDigest = SHA256.hash(
+            data: Data("Correction after restart\u{0}Final answer".utf8)
+        )
+        legacyPointer.contentHash = legacyDigest
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try index.upsertPointer(legacyPointer)
+        let legacyRecord = try index.pointer(id: legacyPointer.id)!
+        let repaired = try restartedScanner.segment(pointerRecord: legacyRecord)
+        try require(
+            repaired.userText == "First request\n\nCorrection after restart",
+            "a pending legacy suffix hash repairs to the complete user turn"
+        )
+        let repairedRecord = try index.pointer(id: legacyPointer.id)!
+        try require(
+            repairedRecord.pointer.contentHash != legacyPointer.contentHash,
+            "legacy pointer repair persists the complete content hash"
+        )
+        try require(
+            restartedScanner.diagnostics().repairedLegacyPointerHashes == 1,
+            "legacy pointer hash repair is observable in diagnostics"
+        )
     }
 
     private static func sessionScannerReadsOnlyChangedFile() throws {
@@ -854,7 +1174,11 @@ struct WorkstateChecks {
             files.append(file)
         }
 
-        let scanner = CodexSessionScanner(sessionsRoot: sessions, runtimeRoot: runtime)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: runtime,
+            retainsLegacyPendingState: false
+        )
         _ = try scanner.scan()
         let baseline = scanner.diagnostics()
         try require(baseline.fullScans == 1, "many-session baseline uses one full scan")
@@ -888,7 +1212,15 @@ struct WorkstateChecks {
             afterChange.metadataReads == baseline.metadataReads,
             "known changed file does not reread corpus metadata (before \(baseline.metadataReads), after \(afterChange.metadataReads))"
         )
-        try require(afterChange.evidenceIndexLoads == 1, "evidence index is loaded once")
+        try require(afterChange.evidenceIndexLoads == 0, "scanner no longer builds a copied evidence index")
+        try require(
+            FileManager.default.fileExists(atPath: scanner.sourceIndexURL.path),
+            "changed-file scan stores source pointers in SQLite"
+        )
+        try require(
+            !FileManager.default.fileExists(atPath: scanner.evidenceURL.path),
+            "changed-file scan does not copy conversation text"
+        )
     }
 
     private static func sessionScannerPreservesIncompleteLine() throws {
@@ -934,8 +1266,14 @@ struct WorkstateChecks {
         try firstWrite.write(contentsOf: Data((prefix + firstHalf).utf8))
         try firstWrite.close()
 
+        let stateBeforeCursorOnlyScan = try Data(contentsOf: scanner.stateURL)
         let beforeCompletion = try scanner.scanChangedFiles([session.path])
         try require(beforeCompletion.isEmpty, "incomplete task completion is not consumed")
+        let stateAfterCursorOnlyScan = try Data(contentsOf: scanner.stateURL)
+        try require(
+            stateAfterCursorOnlyScan == stateBeforeCursorOnlyScan,
+            "cursor-only progress does not rewrite ingestion-state.json"
+        )
 
         let secondWrite = try FileHandle(forWritingTo: session)
         try secondWrite.seekToEnd()
@@ -1024,6 +1362,938 @@ struct WorkstateChecks {
         try require(state.cursors.count == 2, "history import primes selected and unselected tasks")
     }
 
+    private static func conversationSourceIndexFreezesBatchHighWaterMark() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-pointer-index-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = try ConversationSourceIndex(
+            databaseURL: root.appendingPathComponent("source-index.sqlite")
+        )
+        let first = ConversationSourcePointer(
+            provider: "codex",
+            threadID: "thread",
+            turnID: "turn-1",
+            sourcePath: "/tmp/source.jsonl",
+            startOffset: 10,
+            endOffset: 40,
+            timestamp: Date(timeIntervalSince1970: 10),
+            cwd: "/tmp",
+            contentHash: "hash-1",
+            messageSpans: [
+                ConversationSourceSpan(kind: .userMessage, startOffset: 12, endOffset: 20),
+                ConversationSourceSpan(kind: .assistantCompletion, startOffset: 30, endOffset: 40)
+            ]
+        )
+        try index.upsertPointer(first)
+        guard let highWaterMark = try index.captureHighWaterMark() else {
+            throw CheckFailure.failed("pointer high-water mark")
+        }
+        let second = ConversationSourcePointer(
+            provider: "codex",
+            threadID: "thread",
+            turnID: "turn-2",
+            sourcePath: "/tmp/source.jsonl",
+            startOffset: 41,
+            endOffset: 80,
+            timestamp: Date(timeIntervalSince1970: 20),
+            cwd: "/tmp",
+            contentHash: "hash-2"
+        )
+        try index.upsertPointer(second)
+        guard let batch = try index.createBatch(through: highWaterMark) else {
+            throw CheckFailure.failed("pointer batch")
+        }
+        try require(batch.pointers.map(\.pointer.turnID) == ["turn-1"], "batch freezes its high-water mark")
+        _ = try index.finalizeBatch(
+            batch.id,
+            completedPointerIDs: [first.id],
+            projectAssignments: [
+                ConversationPointerProjectAssignment(pointerID: first.id, projectID: "project")
+            ]
+        )
+        let reassigned = try index.reassignCompletedPointers([first.id], to: "research")
+        try require(reassigned == 1, "one completed pointer can be reassigned explicitly")
+        let reassignedPointer = try index.pointer(id: first.id)
+        try require(
+            reassignedPointer?.projectID == "research",
+            "completed pointer reassignment updates only project ownership"
+        )
+        let pending = try index.pendingPointers()
+        try require(pending.map(\.pointer.turnID) == ["turn-2"], "later pointers remain pending")
+
+        for number in 3...551 {
+            try index.upsertPointer(
+                ConversationSourcePointer(
+                    provider: "codex",
+                    threadID: number == 551 ? "target-thread" : "other-thread",
+                    turnID: "turn-\(number)",
+                    sourcePath: "/tmp/source.jsonl",
+                    startOffset: UInt64(number * 100),
+                    endOffset: UInt64(number * 100 + 40),
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(number)),
+                    cwd: "/tmp",
+                    contentHash: "hash-\(number)"
+                )
+            )
+        }
+        let targeted = try index.pendingPointers(
+            provider: "codex",
+            threadIDs: ["target-thread"],
+            limit: 500
+        )
+        try require(
+            targeted.map(\.pointer.turnID) == ["turn-551"],
+            "project lookup does not lose a target behind unrelated backlog"
+        )
+        guard let backlogHighWater = try index.captureHighWaterMark(),
+              let backlogBatch = try index.createBatch(
+                through: backlogHighWater,
+                limit: 500
+              ) else {
+            throw CheckFailure.failed("bounded backlog batch")
+        }
+        try require(backlogBatch.pointers.count == 500, "one batch is capped at 500 pointers")
+        _ = try index.finalizeBatch(
+            backlogBatch.id,
+            completedPointerIDs: backlogBatch.pointers.map(\.id)
+        )
+        let remainingBacklogCount = try index.pendingStats().count
+        try require(
+            remainingBacklogCount == 50,
+            "backlog after the first 500 remains visible for later scheduling"
+        )
+    }
+
+    private static func conversationBatchPolicyRequiresQuietOrExplicitTrigger() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let policy = ConversationBatchPolicy(
+            quietInterval: 20 * 60,
+            maximumEstimatedSourceBytes: 256 * 1024
+        )
+        let active = PendingConversationActivity(
+            pointerCount: 3,
+            oldestCompletedAt: now.addingTimeInterval(-30 * 60),
+            latestCompletedAt: now.addingTimeInterval(-19 * 60),
+            estimatedSourceBytes: 2_000
+        )
+        try require(policy.automaticTrigger(for: active, now: now) == nil, "active chat does not auto-process")
+        var quiet = active
+        quiet.latestCompletedAt = now.addingTimeInterval(-20 * 60)
+        try require(
+            policy.automaticTrigger(for: quiet, now: now) == .quietPeriod,
+            "twenty minutes of global quiet creates one automatic batch"
+        )
+        var oversized = active
+        oversized.estimatedSourceBytes = 256 * 1024
+        try require(
+            policy.automaticTrigger(for: oversized, now: now) == .safetySize,
+            "bounded source size can close a batch before quiet"
+        )
+    }
+
+    private static func conversationBatchesAreIsolatedByThread() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-thread-batch-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let first = sessions.appendingPathComponent("first.jsonl")
+        let second = sessions.appendingPathComponent("second.jsonl")
+        let now = Date().addingTimeInterval(-60 * 60)
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+        func prime(_ url: URL, threadID: String) throws {
+            let metadata = """
+            {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"\(threadID)","cwd":"/tmp/project"}}
+
+            """
+            try Data(metadata.utf8).write(to: url)
+        }
+        try prime(first, threadID: "thread-a")
+        try prime(second, threadID: "thread-b")
+
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        _ = try scanner.scan()
+
+        func appendTurn(_ url: URL, id: String) throws {
+            let text = """
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"\(id)"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"Instruction only"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"\(id)","last_agent_message":"Done"}}
+
+            """
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(text.utf8))
+            try handle.close()
+        }
+        try appendTurn(first, id: "turn-a")
+        _ = try scanner.scanChangedFiles([first.path])
+        try appendTurn(second, id: "turn-b")
+        _ = try scanner.scanChangedFiles([second.path])
+
+        let runtime = try makeIgnoreBatchRuntime(root: root)
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: root))
+        try repository.ensureInitialized(initial: WorkspaceSnapshot())
+        let coordinator = ConversationBatchCoordinator(
+            scanner: scanner,
+            orchestrator: WorkstateOrchestrator(
+                service: WorkstateService(repository: repository),
+                scanner: scanner,
+                runtime: runtime
+            )
+        )
+        let activities = try coordinator.pendingThreadActivities()
+        try require(
+            activities.map(\.threadID) == ["thread-a", "thread-b"],
+            "pending conversations retain independent queues"
+        )
+        let schedulingNow = Date()
+        let otherThreadDelay = try coordinator.nextAutomaticDelay(
+            now: schedulingNow,
+            notBeforeByThread: [
+                "thread-a": schedulingNow.addingTimeInterval(10 * 60)
+            ]
+        )
+        try require(
+            otherThreadDelay == 0,
+            "one conversation cooldown does not delay another due conversation"
+        )
+
+        let firstRun = try coordinator.process(trigger: .manual)
+        try require(firstRun?.pointerCount == 1, "one processing batch contains one conversation")
+        let index = try ConversationSourceIndex(databaseURL: scanner.sourceIndexURL)
+        let firstState = try index.pointers(provider: "codex", threadID: "thread-a", limit: 10)
+        let secondState = try index.pointers(provider: "codex", threadID: "thread-b", limit: 10)
+        try require(firstState.first?.processingState == .completed, "first conversation completes independently")
+        try require(secondState.first?.processingState == .pending, "second conversation remains pending")
+        let sameThreadDelay = try coordinator.nextAutomaticDelay(
+            now: schedulingNow,
+            notBeforeByThread: [
+                "thread-b": schedulingNow.addingTimeInterval(10 * 60)
+            ]
+        )
+        try require(
+            sameThreadDelay.map { abs($0 - 10 * 60) < 1 } == true,
+            "a remaining batch from the same conversation observes its cooldown"
+        )
+
+        let secondRun = try coordinator.process(trigger: .manual)
+        try require(secondRun?.pointerCount == 1, "second conversation creates its own batch")
+        let finalSecondState = try index.pointers(provider: "codex", threadID: "thread-b", limit: 10)
+        try require(finalSecondState.first?.processingState == .completed, "second conversation completes later")
+    }
+
+    private static func batchRouterExpandsSemanticPacketCoverage() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-route-packet-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("sessions", isDirectory: true),
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        let runtime = try makeIgnoreBatchRuntime(root: root)
+        let timestamp = Date()
+        let segments = [
+            SessionSegment(
+                threadID: "packet-thread",
+                turnID: "first",
+                sourcePath: "/tmp/first.jsonl",
+                startOffset: 0,
+                endOffset: 1,
+                cwd: "/tmp/project",
+                userText: "First",
+                assistantText: "Done",
+                timestamp: timestamp
+            ),
+            SessionSegment(
+                threadID: "packet-thread",
+                turnID: "second",
+                sourcePath: "/tmp/second.jsonl",
+                startOffset: 0,
+                endOffset: 1,
+                cwd: "/tmp/project",
+                userText: "Second",
+                assistantText: "Done",
+                timestamp: timestamp.addingTimeInterval(1)
+            )
+        ]
+        let decisions = try runtime.routeBatch(
+            segments: segments,
+            workspace: WorkspaceSnapshot(),
+            routeHints: [:],
+            scanner: scanner
+        )
+        try require(
+            Set(decisions.map(\.segmentId)) == Set(segments.map(\.id))
+                && decisions.count == 2,
+            "one semantic Router packet expands to every covered source pointer"
+        )
+    }
+
+    private static func conversationBatchCapsRouterTurns() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-router-cap-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let source = sessions.appendingPathComponent("rollout.jsonl")
+        let now = Date().addingTimeInterval(-60 * 60)
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: source)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        _ = try scanner.scan()
+
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.seekToEnd()
+        for index in 1...21 {
+            let turn = """
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"turn-\(index)"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"Instruction \(index)"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"turn-\(index)","last_agent_message":"Done"}}
+
+            """
+            try handle.write(contentsOf: Data(turn.utf8))
+        }
+        try handle.close()
+        _ = try scanner.scanChangedFiles([source.path])
+
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: root))
+        try repository.ensureInitialized(initial: WorkspaceSnapshot())
+        let coordinator = ConversationBatchCoordinator(
+            scanner: scanner,
+            orchestrator: WorkstateOrchestrator(
+                service: WorkstateService(repository: repository),
+                scanner: scanner,
+                runtime: try makeIgnoreBatchRuntime(root: root)
+            )
+        )
+        let first = try coordinator.process(trigger: .manual)
+        try require(first?.pointerCount == 20, "one Router call is capped at twenty turns")
+        let remaining = try coordinator.pendingActivity()
+        try require(remaining.pointerCount == 1, "later turns remain pending")
+        let second = try coordinator.process(trigger: .manual)
+        try require(second?.pointerCount == 1, "the remaining turn forms the next batch")
+    }
+
+    private static func stewardReceivesOnlyActiveWorklines() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-active-workline-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let runtimeScript = root.appendingPathComponent("active-workline-runtime.js")
+        let runtimeSource = #"""
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", chunk => { input += chunk; });
+        process.stdin.on("end", () => {
+          const request = JSON.parse(input);
+          const ids = request.project.activeWorklines.map(workline => workline.id);
+          if (request.mode !== "batch_steward" || JSON.stringify(ids) !== JSON.stringify(["active"])) {
+            process.exit(9);
+          }
+          process.stdout.write(JSON.stringify({
+            mode: request.mode,
+            runtimeThreadId: "ephemeral-active-workline-check",
+            usage: null,
+            result: { changes: [] }
+          }));
+        });
+        """#
+        try Data(runtimeSource.utf8).write(to: runtimeScript, options: .atomic)
+        let now = Date()
+        let project = ProjectRecord(
+            id: "project",
+            name: "Project",
+            summary: "Workline state boundary",
+            tasks: [
+                TaskRecord(
+                    id: "parked",
+                    title: "Parked",
+                    objective: "Must stay out of Owner input",
+                    status: .parked,
+                    startedAt: now,
+                    updatedAt: now,
+                    branchedFromEventID: "project-start"
+                ),
+                TaskRecord(
+                    id: "active",
+                    title: "Active",
+                    objective: "May be continued",
+                    status: .active,
+                    startedAt: now,
+                    updatedAt: now,
+                    branchedFromEventID: "project-start"
+                )
+            ]
+        )
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("sessions", isDirectory: true),
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        let runtime = AgentRuntimeClient(
+            runtimeScript: runtimeScript,
+            nodePath: AgentRuntimeClient.defaultNodePath(),
+            runtimeRoot: root
+        )
+        let result = try runtime.stewardBatch(
+            segments: [
+                SessionSegment(
+                    threadID: "thread",
+                    turnID: "turn",
+                    sourcePath: "/tmp/source.jsonl",
+                    startOffset: 0,
+                    endOffset: 1,
+                    cwd: "/tmp",
+                    userText: "Continue current work",
+                    assistantText: "Done",
+                    timestamp: now
+                )
+            ],
+            project: project,
+            scanner: scanner
+        )
+        try require(result.changes.isEmpty, "Steward payload excludes every inactive workline")
+    }
+
+    private static func sessionScannerFastPollIgnoresDeletedFiles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-deleted-session-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let source = sessions.appendingPathComponent("deleted.jsonl")
+        let metadata = """
+        {"type":"session_meta","timestamp":"2026-07-28T00:00:00.000Z","payload":{"id":"deleted-thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: source)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        _ = try scanner.scan()
+        try FileManager.default.removeItem(at: source)
+        let fastPollChanges = try scanner.knownSessionPathsWithSizeChanges()
+        try require(
+            fastPollChanges.isEmpty,
+            "fast source polling does not report a deleted file forever"
+        )
+        _ = try scanner.scan()
+        let reconciledChanges = try scanner.knownSessionPathsWithSizeChanges()
+        try require(
+            reconciledChanges.isEmpty,
+            "full reconciliation prunes a deleted session cursor"
+        )
+    }
+
+    private static func dailyBriefRunGateRunsOncePerDay() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-daily-gate-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gate = DailyBriefRunGate(root: root)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let first = Date(timeIntervalSince1970: 1_753_660_800)
+        let firstRun = try gate.beginIfNeeded(now: first, calendar: calendar)
+        try require(
+            firstRun,
+            "the daily brief starts on the first attempt of a day"
+        )
+        let repeated = try gate.beginIfNeeded(
+            now: first.addingTimeInterval(60 * 60),
+            calendar: calendar
+        )
+        try require(!repeated, "reopening the app does not rerun the same daily brief")
+        let nextDay = try gate.beginIfNeeded(
+            now: first.addingTimeInterval(24 * 60 * 60),
+            calendar: calendar
+        )
+        try require(nextDay, "the daily brief can run again on the next day")
+    }
+
+    private static func conversationBatchQuarantinesOnlyUnreadablePointers() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-pointer-isolation-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let valid = sessions.appendingPathComponent("valid.jsonl")
+        let stale = sessions.appendingPathComponent("stale.jsonl")
+        let later = sessions.appendingPathComponent("later.jsonl")
+        let now = Date().addingTimeInterval(-60 * 60)
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+        func source(
+            threadID: String,
+            turnID: String,
+            assistant: String,
+            timestamp: Date
+        ) -> String {
+            """
+            {"type":"session_meta","timestamp":"\(timestamp.formatted(iso))","payload":{"id":"\(threadID)","cwd":"/tmp/project"}}
+            {"type":"event_msg","timestamp":"\(timestamp.formatted(iso))","payload":{"type":"task_started","turn_id":"\(turnID)"}}
+            {"type":"event_msg","timestamp":"\(timestamp.formatted(iso))","payload":{"type":"user_message","message":"Instruction only"}}
+            {"type":"event_msg","timestamp":"\(timestamp.formatted(iso))","payload":{"type":"task_complete","turn_id":"\(turnID)","last_agent_message":"\(assistant)"}}
+
+            """
+        }
+        let metadataOnly = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadataOnly.utf8).write(to: valid)
+        try Data(metadataOnly.utf8).write(to: stale)
+        try Data(metadataOnly.utf8).write(to: later)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        _ = try scanner.scan()
+        try Data(source(
+            threadID: "thread",
+            turnID: "valid-turn",
+            assistant: "Good",
+            timestamp: now
+        ).utf8).write(to: valid)
+        try Data(source(
+            threadID: "thread",
+            turnID: "stale-turn",
+            assistant: "Good",
+            timestamp: now
+        ).utf8).write(to: stale)
+        _ = try scanner.scanChangedFiles([valid.path, stale.path])
+        try Data(source(
+            threadID: "thread",
+            turnID: "stale-turn",
+            assistant: "Badd",
+            timestamp: now
+        ).utf8).write(to: stale)
+
+        let runtime = try makeIgnoreBatchRuntime(root: root)
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: root))
+        try repository.ensureInitialized(initial: WorkspaceSnapshot())
+        let coordinator = ConversationBatchCoordinator(
+            scanner: scanner,
+            orchestrator: WorkstateOrchestrator(
+                service: WorkstateService(repository: repository),
+                scanner: scanner,
+                runtime: runtime
+            )
+        )
+        let result = try coordinator.process(trigger: .manual)
+        try require(result?.pointerCount == 2, "one thread batch includes both source pointers")
+        try require(result?.failedPointerCount == 1, "only the unreadable source pointer fails")
+        try require(result?.summary.agentRuns == 1, "valid evidence still reaches the Router")
+
+        let index = try ConversationSourceIndex(databaseURL: scanner.sourceIndexURL)
+        let records = try index.pointers(provider: "codex", threadID: "thread", limit: 10)
+        let byTurn = Dictionary(uniqueKeysWithValues: records.map { ($0.pointer.turnID, $0) })
+        try require(byTurn["valid-turn"]?.processingState == .completed, "valid pointer completes")
+        try require(byTurn["stale-turn"]?.processingState == .failed, "stale pointer is isolated")
+
+        let laterTimestamp = now.addingTimeInterval(60).formatted(iso)
+        let laterTurn = """
+        {"type":"event_msg","timestamp":"\(laterTimestamp)","payload":{"type":"task_started","turn_id":"later-turn"}}
+        {"type":"event_msg","timestamp":"\(laterTimestamp)","payload":{"type":"user_message","message":"Instruction only"}}
+        {"type":"event_msg","timestamp":"\(laterTimestamp)","payload":{"type":"task_complete","turn_id":"later-turn","last_agent_message":"Later"}}
+
+        """
+        let laterHandle = try FileHandle(forWritingTo: later)
+        try laterHandle.seekToEnd()
+        try laterHandle.write(contentsOf: Data(laterTurn.utf8))
+        try laterHandle.close()
+        _ = try scanner.scanChangedFiles([later.path])
+        let laterResult = try coordinator.process(trigger: .manual)
+        try require(
+            laterResult?.summary.agentRuns == 1,
+            "an unreadable historical pointer does not block a later Router batch"
+        )
+        let laterRecords = try index.pointers(provider: "codex", threadID: "thread", limit: 10)
+        try require(
+            laterRecords.first(where: { $0.pointer.turnID == "later-turn" })?.processingState == .completed,
+            "later evidence completes despite stale optional context"
+        )
+        try require(
+            scanner.diagnostics().recentContextFailures == 1,
+            "skipped unreadable recent context is observable in diagnostics"
+        )
+        let requeued = try index.requeueFailedPointers([
+            ConversationSourcePointerID(
+                provider: "codex",
+                threadID: "thread",
+                turnID: "stale-turn"
+            )
+        ])
+        try require(requeued == 1, "one selected failed pointer can be requeued")
+        let requeuedRecord = try index.pointer(
+            id: ConversationSourcePointerID(
+                provider: "codex",
+                threadID: "thread",
+                turnID: "stale-turn"
+            )
+        )
+        try require(
+            requeuedRecord?.processingState == .pending
+                && requeuedRecord?.batchID == nil
+                && requeuedRecord?.failureMessage == nil,
+            "requeue clears failed batch ownership without changing other pointers"
+        )
+    }
+
+    private static func makeIgnoreBatchRuntime(root: URL) throws -> AgentRuntimeClient {
+        let script = root.appendingPathComponent("ignore-batch-runtime.js")
+        let source = #"""
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", chunk => { input += chunk; });
+        process.stdin.on("end", () => {
+          const request = JSON.parse(input);
+          if (request.mode !== "batch_route") process.exit(7);
+          const result = { routes: [{
+            startPosition: 1,
+            endPosition: request.segments.length,
+            action: "ignore",
+            projectId: "",
+            projectName: "",
+            projectSummary: "",
+            disposition: "ignore",
+            bundleId: "",
+            bundleTitle: "",
+            bundleSummary: "",
+            signals: [],
+            confidence: 1,
+            reason: "No durable consequence"
+          }] };
+          process.stdout.write(JSON.stringify({
+            mode: request.mode,
+            runtimeThreadId: "ephemeral-ignore-batch",
+            usage: null,
+            result
+          }));
+        });
+        """#
+        try Data(source.utf8).write(to: script, options: .atomic)
+        return AgentRuntimeClient(
+            runtimeScript: script,
+            nodePath: AgentRuntimeClient.defaultNodePath(),
+            runtimeRoot: root
+        )
+    }
+
+    private static func semanticBundlesWaitForCommitBeforeOwner() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-semantic-batch-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: root))
+        try repository.ensureInitialized(initial: WorkspaceSnapshot())
+        _ = try WorkstateService(repository: repository).createProject(
+            ProjectCreateInput(
+                id: "project",
+                name: "Project",
+                summary: "Semantic bundle target",
+                purpose: "Verify carry and commit routing",
+                position: GraphPosition(x: 0, y: 0)
+            )
+        )
+        _ = try WorkstateService(repository: repository).createProject(
+            ProjectCreateInput(
+                id: "project-b",
+                name: "Project B",
+                summary: "Project drift target",
+                purpose: "Verify Owner escalation to Router",
+                position: GraphPosition(x: 200, y: 0)
+            )
+        )
+        let now = Date()
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let session = sessions.appendingPathComponent("rollout.jsonl")
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: session)
+        let scanner = CodexSessionScanner(sessionsRoot: sessions, runtimeRoot: root)
+        _ = try scanner.scan()
+
+        let runtimeScript = root.appendingPathComponent("semantic-runtime.js")
+        let runtimeSource = #"""
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", chunk => { input += chunk; });
+        process.stdin.on("end", () => {
+          const request = JSON.parse(input);
+          let result;
+          if (request.mode === "batch_route") {
+            result = { routes: request.segments.map((segment, index) => {
+              const drift = segment.turnID === "drift-turn";
+              const carry = segment.turnID === "carry-turn";
+              return {
+                startPosition: index + 1,
+                endPosition: index + 1,
+                action: drift ? "switch_project" : "continue_previous",
+                projectId: drift ? "project-b" : "project",
+                projectName: drift ? "Project B" : "Project",
+                projectSummary: drift ? "Project drift target" : "Semantic bundle target",
+                disposition: carry ? "carry" : "commit",
+                bundleId: drift ? "bundle-project-b" : "bundle-project",
+                bundleTitle: drift ? "Project drift" : "Project decision",
+                bundleSummary: drift ? "Moved to Project B" : "Compared and selected one option",
+                signals: carry ? [] : [{
+                  type: "decision",
+                  authority: "user_confirmed",
+                  summary: drift ? "Project changed" : "Selected the first option"
+                }],
+                confidence: 1,
+                reason: drift ? "Conversation moved to Project B" : "Current binding remains valid"
+              };
+            }) };
+          } else if (request.mode === "batch_steward") {
+            result = { changes: [] };
+          } else {
+            process.exit(5);
+          }
+          process.stdout.write(JSON.stringify({
+            mode: request.mode,
+            runtimeThreadId: "ephemeral-run-semantic-test",
+            usage: null,
+            result
+          }));
+        });
+        """#
+        try Data(runtimeSource.utf8).write(to: runtimeScript, options: .atomic)
+        let runtime = AgentRuntimeClient(
+            runtimeScript: runtimeScript,
+            nodePath: AgentRuntimeClient.defaultNodePath(),
+            runtimeRoot: root
+        )
+        let orchestrator = WorkstateOrchestrator(
+            service: WorkstateService(repository: repository),
+            scanner: scanner,
+            runtime: runtime
+        )
+        let coordinator = ConversationBatchCoordinator(
+            scanner: scanner,
+            orchestrator: orchestrator
+        )
+        try scanner.recordRoute(
+            threadID: "thread",
+            turnID: "initial-binding",
+            projectID: "project"
+        )
+
+        func appendTurn(id: String, user: String, assistant: String) throws {
+            let text = """
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"\(id)"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"\(user)"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"\(id)","last_agent_message":"\(assistant)"}}
+
+            """
+            let handle = try FileHandle(forWritingTo: session)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(text.utf8))
+            try handle.close()
+        }
+
+        try appendTurn(id: "carry-turn", user: "Let us compare the options", assistant: "Still open")
+        _ = try coordinator.scanChanged(paths: [session.path])
+        let carryRun = try coordinator.process(trigger: .manual)
+        try require(carryRun?.summary.agentRuns == 1, "carry batch calls only the Router")
+        let sourceIndex = try ConversationSourceIndex(databaseURL: scanner.sourceIndexURL)
+        let openBundles = try sourceIndex.semanticBundles()
+        try require(
+            openBundles.map(\.id) == ["bundle-project"],
+            "carry batch persists one open semantic bundle"
+        )
+        let carryProject = try repository.load().project(id: "project")
+        try require(
+            carryProject?.events.count == 1,
+            "no-change Owner result does not mutate the project"
+        )
+
+        try appendTurn(id: "commit-turn", user: "Use the first option", assistant: "Confirmed")
+        _ = try coordinator.scanChanged(paths: [session.path])
+        let commitRun = try coordinator.process(trigger: .manual)
+        try require(commitRun?.summary.agentRuns == 2, "commit batch calls Router then Project Owner")
+        let bundlesAfterCommit = try sourceIndex.semanticBundles()
+        try require(
+            bundlesAfterCommit.isEmpty,
+            "committed semantic bundle closes after Owner receives all evidence"
+        )
+        let indexedTurns = try sourceIndex.pointers(
+            provider: "codex",
+            threadID: "thread",
+            limit: 10
+        )
+        try require(
+            indexedTurns.count == 2
+                && indexedTurns.allSatisfy { $0.processingState == .completed },
+            "carry and commit pointers both finish exactly once"
+        )
+
+        try appendTurn(id: "drift-turn", user: "Continue in Project B", assistant: "Switched")
+        _ = try coordinator.scanChanged(paths: [session.path])
+        let driftRun = try coordinator.process(trigger: .manual)
+        try require(
+            driftRun?.summary.agentRuns == 2,
+            "project drift calls Router then target Owner (got \(driftRun?.summary.agentRuns ?? -1))"
+        )
+        let driftHistory = try scanner.routeBindingHistory(threadID: "thread")
+        try require(
+            driftHistory.map(\.projectID) == ["project", "project-b"],
+            "Router appends a new project binding after detecting drift"
+        )
+    }
+
+    private static func largeConversationResolvesByMessageSpans() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-large-source-check-\(UUID().uuidString)", isDirectory: true)
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let runtime = root.appendingPathComponent("runtime", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let source = sessions.appendingPathComponent("rollout.jsonl")
+        let now = Date()
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(now.formatted(iso))","payload":{"id":"large-thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: source)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: sessions,
+            runtimeRoot: runtime,
+            retainsLegacyPendingState: false
+        )
+        _ = try scanner.scan()
+
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.seekToEnd()
+        let prefix = """
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"large-turn"}}
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"Pointer-only secret sentence"}}
+        {"type":"response_item","payload":{"type":"tool_output","output":"
+        """
+        try handle.write(contentsOf: Data(prefix.utf8))
+        let sparseGap: UInt64 = 2 * 1024 * 1024 * 1024
+        try handle.seek(toOffset: try handle.offset() + sparseGap)
+        let suffix = """
+        "}}
+        {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"large-turn","last_agent_message":"Resolved without copying the sparse payload"}}
+
+        """
+        try handle.write(contentsOf: Data(suffix.utf8))
+        try handle.close()
+
+        let captured = try scanner.scanChangedFiles([source.path])
+        try require(captured.count == 1, "large sparse source yields one completed turn")
+        let sourceReference = SourceReference(
+            id: "source-large",
+            kind: "conversation",
+            label: "Large source",
+            locator: source.path,
+            threadID: "large-thread",
+            turnIDs: ["large-turn"],
+            contentHash: captured[0].assistantText.isEmpty ? "" : captured[0].id,
+            provider: "codex",
+            startOffset: captured[0].startOffset,
+            endOffset: captured[0].endOffset,
+            messageSpans: captured[0].sourceSpans
+        )
+        let before = scanner.diagnostics().sourceResolutionBytesRead
+        let messages = try scanner.resolveMessages(for: sourceReference)
+        let after = scanner.diagnostics().sourceResolutionBytesRead
+        try require(messages.map(\.text).contains("Pointer-only secret sentence"), "source resolves original user text")
+        try require(after - before < 16 * 1024, "L3 reads only indexed message spans")
+        try require(!FileManager.default.fileExists(atPath: scanner.evidenceURL.path), "large source is never copied")
+        let stateText = try String(contentsOf: scanner.stateURL, encoding: .utf8)
+        try require(!stateText.contains("Pointer-only secret sentence"), "ingestion state stores no raw turn text")
+        let pointerOnlyState = try scanner.loadState()
+        try require(
+            pointerOnlyState.pendingSegmentIDs.isEmpty
+                && (pointerOnlyState.processingRecords?.isEmpty != false),
+            "live pointer backend does not duplicate pending work into state JSON"
+        )
+        let databaseText = String(decoding: try Data(contentsOf: scanner.sourceIndexURL), as: UTF8.self)
+        try require(!databaseText.contains("Pointer-only secret sentence"), "SQLite stores pointers, not conversation text")
+    }
+
+    private static func durableMemoryPersistsSelectiveDocuments() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-memory-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = DurableMemoryRepository(root: root)
+        let draft = DurableMemoryDocumentDraft(
+            namespace: .collaborationRules,
+            slug: "working-rules",
+            description: "Confirmed collaboration rules",
+            scope: .global,
+            entries: [
+                DurableMemoryEntryDraft(
+                    id: "rule-serious-treatment",
+                    text: "Do not soothe; take the work seriously.",
+                    authority: .userConfirmed,
+                    lifecycle: .active,
+                    evidencePointerIDs: ["codex:thread:turn"]
+                )
+            ]
+        )
+        _ = try repository.apply(
+            DurableMemoryMutation(
+                id: "create-rules",
+                authorizedBy: .userConfirmed,
+                timestamp: Date(),
+                operation: .createDocument(draft)
+            )
+        )
+        let selected = try repository.retrieve(DurableMemorySelection())
+        try require(selected.flatMap(\.entries).map(\.id) == ["rule-serious-treatment"], "global rules load by default")
+        let documentURL = repository.documentURL(for: draft.key)
+        try require(FileManager.default.fileExists(atPath: documentURL.path), "memory writes one namespaced document")
+
+        do {
+            _ = try repository.apply(
+                DurableMemoryMutation(
+                    id: "invalid-authority",
+                    expectedDocumentVersion: 1,
+                    authorizedBy: .agentInferred,
+                    timestamp: Date(),
+                    operation: .createEntry(
+                        document: draft.key,
+                        entry: DurableMemoryEntryDraft(
+                            id: "invalid-confirmation",
+                            text: "Agent cannot promote its own inference.",
+                            authority: .userConfirmed,
+                            lifecycle: .active
+                        )
+                    )
+                )
+            )
+            throw CheckFailure.failed("agent inference cannot become user-confirmed memory")
+        } catch is DurableMemoryError {
+            // Expected fail-fast authority rejection.
+        }
+    }
+
     private static func monitoringCutoffDropsDisabledPeriod() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("workstate-monitoring-cutoff-check-\(UUID().uuidString)", isDirectory: true)
@@ -1060,9 +2330,18 @@ struct WorkstateChecks {
 
         let result = try scanner.scanChangedFiles([session.path], minimumTimestamp: now)
         try require(result.map(\.turnID) == ["enabled-turn"], "monitoring cutoff drops disabled-period turns")
-        let evidence = try Data(contentsOf: scanner.evidenceURL)
-        let evidenceText = String(data: evidence, encoding: .utf8) ?? ""
-        try require(!evidenceText.contains("Disabled period"), "disabled-period content never enters evidence")
+        let sourceIndex = try ConversationSourceIndex(databaseURL: scanner.sourceIndexURL)
+        let disabledPointer = try sourceIndex.pointer(
+            id: ConversationSourcePointerID(
+                provider: "codex",
+                threadID: "thread",
+                turnID: "disabled-turn"
+            )
+        )
+        try require(
+            disabledPointer == nil,
+            "disabled-period turn never enters the source index"
+        )
 
         let historicalTurnID = "019eb0cf-abbf-7913-84c5-c88f18d3c83f"
         let replay = """
@@ -1098,18 +2377,51 @@ struct WorkstateChecks {
             pendingAfterReplay.contains(where: { $0.turnID == queuedHistoricalTurnID }),
             "historical replay is queued without a monitoring cutoff"
         )
-        let discarded = try scanner.discardUnprocessed(before: now)
-        try require(discarded == 1, "disabled-period recovery discards queued historical turns")
-        let repairedEvidence = try String(contentsOf: scanner.evidenceURL, encoding: .utf8)
+        let hostedRuntime = AppHostedConversationRuntime(
+            runtimeRoot: runtime,
+            sessionsRoot: sessions,
+            minimumTimestamp: now
+        )
+        try hostedRuntime.start()
+        defer { hostedRuntime.stop() }
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if try sourceIndex.pointer(
+                id: ConversationSourcePointerID(
+                    provider: "codex",
+                    threadID: "thread",
+                    turnID: queuedHistoricalTurnID
+                )
+            ) == nil {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        let discardedPointer = try sourceIndex.pointer(
+            id: ConversationSourcePointerID(
+                provider: "codex",
+                threadID: "thread",
+                turnID: queuedHistoricalTurnID
+            )
+        )
         try require(
-            !repairedEvidence.contains("Replayed historical turn"),
-            "disabled-period recovery removes historical evidence"
+            discardedPointer == nil,
+            "app-hosted monitoring removes queued disabled-period pointers before scheduling"
         )
     }
 
-    private static func segmentProcessingIsIdempotent() throws {
+    private static func interruptedBatchFailsWithoutModelRetry() throws {
         try withFixture { repository in
-            try repository.ensureInitialized(initial: WorkstateBootstrap.makeInitialState())
+            try repository.ensureInitialized(initial: WorkspaceSnapshot())
+            _ = try WorkstateService(repository: repository).createProject(
+                ProjectCreateInput(
+                    id: "project",
+                    name: "Project",
+                    summary: "Recovery target",
+                    purpose: "Verify interrupted batch recovery",
+                    position: GraphPosition(x: 0, y: 0)
+                )
+            )
             let sessions = repository.paths.root.appendingPathComponent("sessions", isDirectory: true)
             try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
             let session = sessions.appendingPathComponent("rollout.jsonl")
@@ -1134,11 +2446,14 @@ struct WorkstateChecks {
             try handle.write(contentsOf: Data(turn.utf8))
             try handle.close()
             let segments = try scanner.scanChangedFiles([session.path])
-            guard let segment = segments.first else {
+            guard !segments.isEmpty else {
                 throw CheckFailure.failed("processing segment fixture")
             }
-
-            try scanner.beginProcessing(segmentID: segment.id, stage: .routing)
+            let index = try ConversationSourceIndex(databaseURL: scanner.sourceIndexURL)
+            guard let highWater = try index.captureHighWaterMark(),
+                  let batch = try index.createBatch(through: highWater) else {
+                throw CheckFailure.failed("interrupted pointer batch fixture")
+            }
             let runtime = AgentRuntimeClient(
                 runtimeScript: repository.paths.root.appendingPathComponent("missing-runtime.js"),
                 nodePath: "/missing/node",
@@ -1149,36 +2464,193 @@ struct WorkstateChecks {
                 scanner: scanner,
                 runtime: runtime
             )
-            let interrupted = try orchestrator.process([segment])
-            try require(interrupted.failed == 1, "interrupted segment is marked failed")
-            try require(interrupted.agentRuns == 0, "interrupted segment does not call the model")
-
-            let repeated = try orchestrator.process([segment])
-            try require(repeated.failed == 1, "failed segment remains pending for diagnosis")
-            try require(repeated.agentRuns == 0, "failed segment is not automatically retried")
-            let failedRecord = try scanner.processingRecord(segmentID: segment.id)
-            try require(failedRecord.stage == .failed, "failed stage persists")
-
-            try scanner.requeue(segmentIDs: [segment.id])
-            let requeuedRecord = try scanner.processingRecord(segmentID: segment.id)
-            try require(requeuedRecord.stage == .queued, "explicit requeue resets failed stage")
-            try scanner.recordRouteResult(
-                segmentID: segment.id,
-                route: RouteResult(
-                    action: "ignore",
-                    projectId: "",
-                    projectName: "",
-                    projectSummary: "",
-                    confidence: 1,
-                    reason: "No durable project change"
-                )
+            let coordinator = ConversationBatchCoordinator(
+                scanner: scanner,
+                orchestrator: orchestrator
             )
-            let resumed = try orchestrator.process([segment])
-            try require(resumed.processed == 1, "persisted route result resumes deterministically")
-            try require(resumed.agentRuns == 0, "persisted route result does not repeat the model call")
-            let completedRecord = try scanner.processingRecord(segmentID: segment.id)
-            try require(completedRecord.stage == .completed, "completed stage persists")
+            let recovered = try coordinator.recoverInterruptedBatches()
+            try require(recovered == 1, "one interrupted batch is recovered")
+            let failedBatch = try index.batch(id: batch.id)
+            try require(
+                failedBatch?.status == .failed
+                    && failedBatch?.pointers.first?.processingState == .failed,
+                "interrupted batch becomes a terminal failure"
+            )
+            let repeatedRecoveryCount = try coordinator.recoverInterruptedBatches()
+            try require(
+                repeatedRecoveryCount == 0,
+                "terminal failure is not retried on the next recovery"
+            )
+            try require(
+                !FileManager.default.fileExists(
+                    atPath: repository.paths.root.appendingPathComponent("agent-runs.jsonl").path
+                ),
+                "interrupted recovery never starts the model"
+            )
+
+            let committedTurn = """
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_started","turn_id":"committed-turn"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"user_message","message":"Recover the prepared commit"}}
+            {"type":"event_msg","timestamp":"\(now.formatted(iso))","payload":{"type":"task_complete","turn_id":"committed-turn","last_agent_message":"Prepared"}}
+
+            """
+            let committedHandle = try FileHandle(forWritingTo: session)
+            try committedHandle.seekToEnd()
+            try committedHandle.write(contentsOf: Data(committedTurn.utf8))
+            try committedHandle.close()
+            let committedSegments = try scanner.scanChangedFiles([session.path])
+            guard let committedSegment = committedSegments.first,
+                  let committedHighWater = try index.captureHighWaterMark(),
+                  let committedBatch = try index.createBatch(through: committedHighWater) else {
+                throw CheckFailure.failed("prepared commit batch fixture")
+            }
+            let plan = ConversationBatchCommitPlan(
+                changes: [],
+                successfulRoutes: [
+                    ProcessedSegmentRoute(
+                        segmentID: committedSegment.id,
+                        threadID: committedSegment.threadID,
+                        turnID: committedSegment.turnID,
+                        projectID: "project"
+                    )
+                ],
+                failedSegmentIDs: [],
+                processed: 1,
+                changed: 0,
+                ignored: 1,
+                agentRuns: 1
+            )
+            let outcomeRoot = repository.paths.root.appendingPathComponent(
+                "batch-outcomes",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: outcomeRoot,
+                withIntermediateDirectories: true
+            )
+            try WorkstateCoding.makeEncoder().encode(
+                TestBatchOutcomeRecord(
+                    batchID: committedBatch.id,
+                    createdAt: now,
+                    plan: plan
+                )
+            ).write(
+                to: outcomeRoot.appendingPathComponent("\(committedBatch.id).json"),
+                options: .atomic
+            )
+            let preparedRecoveryCount = try coordinator.recoverInterruptedBatches()
+            try require(
+                preparedRecoveryCount == 1,
+                "prepared commit is finalized without repeating the model"
+            )
+            let completedBatch = try index.batch(id: committedBatch.id)
+            try require(
+                completedBatch?.status == .completed
+                    && completedBatch?.pointers.first?.projectID == "project",
+                "prepared commit restores pointer assignment"
+            )
+            let recoveredBinding = try scanner.routeBinding(threadID: "thread")
+            try require(
+                recoveredBinding?.projectID == "project",
+                "prepared commit restores the thread route"
+            )
         }
+    }
+
+    private static func semanticBundlesPersistRoutedEvidence() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-semantic-bundle-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let session = sessions.appendingPathComponent("rollout.jsonl")
+        let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let firstDate = Date(timeIntervalSince1970: 1_784_800_000)
+        let secondDate = firstDate.addingTimeInterval(1)
+        let thirdDate = secondDate.addingTimeInterval(1)
+        let metadata = """
+        {"type":"session_meta","timestamp":"\(firstDate.formatted(iso))","payload":{"id":"thread","cwd":"/tmp/project"}}
+
+        """
+        try Data(metadata.utf8).write(to: session)
+        let scanner = CodexSessionScanner(sessionsRoot: sessions, runtimeRoot: root)
+        _ = try scanner.scan()
+        let turns = """
+        {"type":"event_msg","timestamp":"\(firstDate.formatted(iso))","payload":{"type":"task_started","turn_id":"turn-a"}}
+        {"type":"event_msg","timestamp":"\(firstDate.formatted(iso))","payload":{"type":"user_message","message":"Discuss option A"}}
+        {"type":"event_msg","timestamp":"\(firstDate.formatted(iso))","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"Option A is still open"}}
+        {"type":"event_msg","timestamp":"\(secondDate.formatted(iso))","payload":{"type":"task_started","turn_id":"turn-b"}}
+        {"type":"event_msg","timestamp":"\(secondDate.formatted(iso))","payload":{"type":"user_message","message":"Legacy routed turn"}}
+        {"type":"event_msg","timestamp":"\(secondDate.formatted(iso))","payload":{"type":"task_complete","turn_id":"turn-b","last_agent_message":"Legacy result"}}
+        {"type":"event_msg","timestamp":"\(thirdDate.formatted(iso))","payload":{"type":"task_started","turn_id":"turn-c"}}
+        {"type":"event_msg","timestamp":"\(thirdDate.formatted(iso))","payload":{"type":"user_message","message":"Legacy routed turn"}}
+        {"type":"event_msg","timestamp":"\(thirdDate.formatted(iso))","payload":{"type":"task_complete","turn_id":"turn-c","last_agent_message":"Legacy result"}}
+
+        """
+        let handle = try FileHandle(forWritingTo: session)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(turns.utf8))
+        try handle.close()
+        let segments = try scanner.scanChangedFiles([session.path])
+        try require(segments.count == 3, "semantic bundle fixture has three completed turns")
+        try scanner.recordRouteResult(
+            segmentID: segments[0].id,
+            route: RouteResult(
+                action: "switch_project",
+                projectId: "project",
+                projectName: "",
+                projectSummary: "",
+                disposition: "carry",
+                bundleId: "bundle-project-option-a",
+                bundleTitle: "Option A",
+                bundleSummary: "Option A is still being discussed.",
+                signals: [
+                    RouteSignal(type: "topic", authority: "assistant_proposal", summary: "Option A remains open")
+                ],
+                confidence: 1,
+                reason: "Relevant but unresolved"
+            )
+        )
+        try scanner.recordRouteResult(
+            segmentID: segments[1].id,
+            route: RouteResult(
+                action: "switch_project",
+                projectId: "project",
+                projectName: "",
+                projectSummary: "",
+                disposition: "commit",
+                bundleId: "bundle-project-option-a",
+                bundleTitle: "Option A",
+                bundleSummary: "Option A has been confirmed.",
+                signals: [
+                    RouteSignal(type: "decision", authority: "user_confirmed", summary: "Option A confirmed")
+                ],
+                confidence: 1,
+                reason: "Confirmed"
+            )
+        )
+        try scanner.recordRouteResult(
+            segmentID: segments[2].id,
+            route: RouteResult(
+                action: "switch_project",
+                projectId: "project",
+                projectName: "",
+                projectSummary: "",
+                confidence: 1,
+                reason: "Legacy route"
+            )
+        )
+        let bundles = try scanner.openSemanticBundles()
+        try require(
+            bundles.count == 1
+                && bundles[0].evidenceIDs == [segments[0].id, segments[1].id]
+                && bundles[0].disposition == "commit",
+            "carried and committed evidence remain visible in one pending semantic bundle"
+        )
+        let requeued = try scanner.requeueLegacyPendingRoutes()
+        try require(requeued == 1, "legacy route is requeued once")
+        let legacy = try scanner.processingRecord(segmentID: segments[2].id)
+        try require(legacy.stage == .queued && legacy.route == nil, "legacy route returns to the Luna gate")
     }
 
     private static func interruptedProcessingRecoversWithoutRepeatingCompletedStages() throws {
@@ -1230,8 +2702,7 @@ struct WorkstateChecks {
                 kind: "contextUpdate",
                 stage: "intake",
                 delivery: "unchanged",
-                facts: [],
-                openIssues: []
+                facts: []
             )
         )
         try scanner.beginProcessing(segmentID: "applying", stage: .applying)
@@ -1278,6 +2749,39 @@ struct WorkstateChecks {
         try require(
             result?.requiresFullScan == true || result?.paths.contains(where: { $0.hasSuffix("rollout.jsonl") }) == true,
             "FSEvents watcher identifies the changed session file"
+        )
+    }
+
+    private static func sessionWatcherReceivesNestedFileAppend() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-nested-watcher-check-\(UUID().uuidString)", isDirectory: true)
+        let day = root.appendingPathComponent("2026/07/28", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+        let session = day.appendingPathComponent("rollout.jsonl")
+        try Data("initial\n".utf8).write(to: session)
+
+        let capture = WatcherCapture()
+        let watcher = CodexSessionWatcher(root: root) { batch in
+            capture.receive(batch)
+        }
+        try watcher.start()
+        defer { watcher.stop() }
+
+        let handle = try FileHandle(forWritingTo: session)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("appended\n".utf8))
+        try handle.close()
+
+        let result = capture.wait(timeout: 5)
+        let canonicalSessionPath = session.resolvingSymlinksInPath().path
+        try require(result != nil, "FSEvents watcher receives an append in a nested day directory")
+        try require(
+            result?.requiresFullScan == true
+                || result?.paths.contains(where: {
+                    URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == canonicalSessionPath
+                }) == true,
+            "FSEvents watcher identifies the nested appended session file"
         )
     }
 
@@ -1366,12 +2870,25 @@ struct WorkstateChecks {
         )
         let activities = LiveActivityProjector().project(
             sessions: [session],
-            workspace: WorkspaceSnapshot(projects: [project], sources: [source])
+            routeBindingHistory: [
+                session.threadID: [
+                    ThreadRouteBinding(
+                        threadID: session.threadID,
+                        turnID: session.turnID,
+                        projectID: project.id,
+                        updatedAt: session.updatedAt
+                    )
+                ]
+            ]
         )
 
         try require(activities.count == 1, "known project thread creates live activity")
         try require(activities.first?.projectID == project.id, "live activity uses source-owned project")
         try require(activities.first?.title == session.userText, "live activity keeps current objective")
+        try require(
+            LiveActivityProjector().project(sessions: [session]).isEmpty,
+            "unbound conversation does not appear in a project timeline"
+        )
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("workstate-live-check-\(UUID().uuidString)", isDirectory: true)
@@ -1381,6 +2898,17 @@ struct WorkstateChecks {
         try repository.save(snapshot)
         let restored = try repository.load()
         try require(restored == snapshot, "live activity snapshot round trip")
+
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("sessions", isDirectory: true),
+            runtimeRoot: root
+        )
+        try scanner.recordRoute(threadID: "thread", turnID: "01900000-0000-7000-8000-000000000001", projectID: "project-a")
+        try scanner.recordRoute(threadID: "thread", turnID: "01900000-0001-7000-8000-000000000002", projectID: "project-b")
+        let history = try scanner.routeBindingHistory(threadID: "thread")
+        try require(history.map(\.projectID) == ["project-a", "project-b"], "thread keeps ordered project binding history")
+        let latestBinding = try scanner.routeBinding(threadID: "thread")
+        try require(latestBinding?.projectID == "project-b", "latest project binding is current")
     }
 
     private static func projectRebuildAppliesVerifiedEvidence() throws {
@@ -1414,7 +2942,11 @@ struct WorkstateChecks {
                 throw CheckFailure.failed("rebuild source")
             }
             try require(source.turnIDs == [evidence.turnID], "rebuild source keeps exact turn")
-            try require(source.excerpt.first?.text == evidence.userText, "rebuild source keeps conversation excerpt")
+            try require(source.excerpt.isEmpty, "rebuild source does not copy conversation text")
+            try require(
+                source.startOffset == evidence.startOffset && source.endOffset == evidence.endOffset,
+                "rebuild source keeps exact byte offsets"
+            )
         }
     }
 
@@ -1554,7 +3086,7 @@ struct WorkstateChecks {
             forbiddenDirections: [
                 RebuildStatement(text: "Do not infer acceptance", evidenceIds: [evidenceID])
             ],
-            openIssues: [],
+            topics: [],
             worklines: [
                 RebuildWorkline(
                     id: "project-core-workline",
@@ -1789,6 +3321,434 @@ struct WorkstateChecks {
                 "statement authority update"
             )
         }
+    }
+
+    private static func ingestionBatchIsAtomicAndUpdatesProjectHead() throws {
+        try withFixture { repository in
+            let start = Date(timeIntervalSince1970: 100)
+            let firstDate = Date(timeIntervalSince1970: 200)
+            let secondDate = firstDate
+            let project = ProjectRecord(
+                id: "project",
+                name: "Project",
+                summary: "Old HEAD",
+                createdAt: start,
+                updatedAt: start,
+                lastActivityAt: start,
+                context: ProjectContext(
+                    currentSummary: "Old HEAD",
+                    purpose: "Keep project memory current"
+                ),
+                events: [
+                    ProjectEvent(
+                        id: "project-start",
+                        timestamp: start,
+                        title: "Project started",
+                        summary: "Start",
+                        kind: .projectStarted,
+                        loopStage: .intake
+                    )
+                ]
+            )
+            try repository.ensureInitialized(
+                initial: WorkspaceSnapshot(updatedAt: start, projects: [project])
+            )
+            let mutationLinesBefore = try Data(contentsOf: repository.paths.events)
+                .split(separator: 0x0A)
+                .count
+            let firstSource = SourceReference(
+                id: "source-first",
+                kind: "conversation",
+                label: "First",
+                locator: "/tmp/first.jsonl"
+            )
+            let secondSource = SourceReference(
+                id: "source-second",
+                kind: "conversation",
+                label: "Second",
+                locator: "/tmp/second.jsonl"
+            )
+            let first = IngestionProjectChange(
+                id: "z-delta-first",
+                projectID: project.id,
+                timestamp: firstDate,
+                sources: [firstSource],
+                title: "Implementation converged",
+                summary: "The implementation now follows the confirmed model.",
+                kind: .implementation,
+                stage: .implementation,
+                delivery: .changed,
+                facts: ["Implementation changed"],
+                operations: OperationalContext(cwd: "/tmp/project"),
+                worklineAction: .startNew,
+                worklineID: "project-core-workline",
+                worklineTitle: "Core workline",
+                worklineObjective: "Reach the confirmed result",
+                branchFromWorklineID: "",
+                isParallel: false,
+                nextFocusedWorklineID: "",
+                closureDisposition: .none,
+                carryoverTitle: "",
+                carryoverSummary: "",
+                carryoverQuestions: [],
+                taskStartEventID: "task-start-first",
+                contextPatch: IngestionContextPatch(
+                    currentSummary: "Current project HEAD",
+                    revisionID: "context-revision-first",
+                    revisionTitle: "Project understanding updated",
+                    revisionSummary: "The confirmed product model is now current.",
+                    revisionStatus: .confirmed,
+                    changes: ["Replace the old HEAD"],
+                    understandingUpserts: [
+                        IngestionUnderstandingMutation(
+                            id: "project-current-model",
+                            text: "The confirmed product model is implemented.",
+                            status: .confirmed
+                        )
+                    ],
+                    decisionUpserts: [
+                        IngestionDecisionMutation(
+                            id: "project-use-confirmed-model",
+                            text: "Use the confirmed product model.",
+                            rationale: "Explicitly confirmed"
+                        )
+                    ]
+                )
+            )
+            let second = IngestionProjectChange(
+                id: "a-delta-second",
+                projectID: project.id,
+                timestamp: secondDate,
+                sources: [secondSource],
+                title: "Verification passed",
+                summary: "The bounded workline is complete.",
+                kind: .verification,
+                stage: .verification,
+                delivery: .checked,
+                facts: ["Checks passed"],
+                operations: OperationalContext(cwd: "/tmp/project"),
+                worklineAction: .completeExisting,
+                worklineID: "project-core-workline",
+                worklineTitle: "",
+                worklineObjective: "",
+                branchFromWorklineID: "",
+                isParallel: false,
+                nextFocusedWorklineID: "",
+                closureDisposition: .completed,
+                carryoverTitle: "",
+                carryoverSummary: "",
+                carryoverQuestions: [],
+                taskStartEventID: "",
+                contextPatch: nil
+            )
+
+            _ = try WorkstateService(repository: repository).applyIngestionChanges(
+                projectID: project.id,
+                changes: [first, second]
+            )
+            let updated = try repository.load().project(id: project.id)
+            try require(updated?.context.currentSummary == "Current project HEAD", "ingestion updates Project HEAD")
+            try require(updated?.context.revisions.map(\.id) == ["context-revision-first"], "ingestion records one context revision")
+            try require(updated?.context.understanding.first?.id == "project-current-model", "ingestion persists structured understanding")
+            try require(updated?.context.acceptedDecisions.first?.id == "project-use-confirmed-model", "ingestion persists confirmed decisions")
+            try require(updated?.task(id: "project-core-workline")?.status == .completed, "batch changes evolve one workline in order")
+            try require(
+                updated?.event(id: "z-delta-first") != nil
+                    && updated?.event(id: "a-delta-second") != nil,
+                "batch changes persist their deltas"
+            )
+            let mutationLinesAfter = try Data(contentsOf: repository.paths.events)
+                .split(separator: 0x0A)
+                .count
+            try require(
+                mutationLinesAfter == mutationLinesBefore + 1,
+                "one ingestion batch writes one workspace mutation"
+            )
+            _ = try WorkstateService(repository: repository).applyIngestionChanges(
+                projectID: project.id,
+                changes: [first, second]
+            )
+            let mutationLinesAfterReplay = try Data(contentsOf: repository.paths.events)
+                .split(separator: 0x0A)
+                .count
+            try require(
+                mutationLinesAfterReplay == mutationLinesAfter,
+                "replaying a committed ingestion batch performs no second write"
+            )
+        }
+    }
+
+    private static func ingestionBatchBranchesNewProjectFromHistoricalStart() throws {
+        try withFixture { repository in
+            try repository.ensureInitialized(initial: WorkspaceSnapshot())
+            let evidenceTime = Date(timeIntervalSince1970: 200)
+            let change = IngestionProjectChange(
+                id: "historical-first-change",
+                projectID: "historical-project",
+                timestamp: evidenceTime,
+                sources: [],
+                title: "Historical work begins",
+                summary: "The first imported change starts a bounded workline.",
+                kind: .implementation,
+                stage: .implementation,
+                delivery: .changed,
+                facts: [],
+                operations: .init(),
+                worklineAction: .startNew,
+                worklineID: "historical-project-first-workline",
+                worklineTitle: "First workline",
+                worklineObjective: "Import historical work",
+                branchFromWorklineID: "",
+                isParallel: false,
+                nextFocusedWorklineID: "historical-project-first-workline",
+                closureDisposition: .none,
+                carryoverTitle: "",
+                carryoverSummary: "",
+                carryoverQuestions: [],
+                taskStartEventID: "historical-project-first-workline-start",
+                contextPatch: nil
+            )
+            let input = ProjectCreateInput(
+                id: "historical-project",
+                name: "Historical Project",
+                summary: "Imported from historical evidence",
+                purpose: "Verify historical project creation",
+                position: GraphPosition(x: 0, y: 0)
+            )
+
+            _ = try WorkstateService(repository: repository).applyIngestionBatch(
+                [change],
+                newProjects: [input]
+            )
+            let project = try repository.load().project(id: input.id)
+            try require(
+                project?.event(id: "project-start-historical-project")?.timestamp == evidenceTime,
+                "new ingestion project starts at its earliest evidence"
+            )
+            try require(
+                project?.task(id: "historical-project-first-workline")?.branchedFromEventID
+                    == "project-start-historical-project",
+                "historical first workline branches from the project start event"
+            )
+        }
+    }
+
+    private static func ingestionFocusSwitchDoesNotCompletePreviousWorkline() throws {
+        try withFixture { repository in
+            let start = Date(timeIntervalSince1970: 100)
+            let firstTask = TaskRecord(
+                id: "project-first",
+                title: "First",
+                objective: "Keep the first scope open",
+                currentStage: .implementation,
+                startedAt: start,
+                updatedAt: start,
+                branchedFromEventID: "project-start"
+            )
+            let project = ProjectRecord(
+                id: "project",
+                name: "Project",
+                summary: "Summary",
+                focusedTaskID: firstTask.id,
+                tasks: [firstTask],
+                events: [
+                    ProjectEvent(
+                        id: "project-start",
+                        timestamp: start,
+                        title: "Project started",
+                        summary: "Start",
+                        kind: .projectStarted,
+                        loopStage: .intake
+                    ),
+                    ProjectEvent(
+                        id: "first-progress",
+                        taskID: firstTask.id,
+                        timestamp: start,
+                        title: "First progress",
+                        summary: "The first scope remains unfinished",
+                        kind: .implementation,
+                        loopStage: .implementation
+                    )
+                ]
+            )
+            try repository.ensureInitialized(initial: WorkspaceSnapshot(projects: [project]))
+            let change = IngestionProjectChange(
+                id: "second-progress",
+                projectID: project.id,
+                timestamp: start.addingTimeInterval(60),
+                sources: [],
+                title: "Second scope started",
+                summary: "Attention moved without completing the first scope.",
+                kind: .implementation,
+                stage: .implementation,
+                delivery: .changed,
+                facts: [],
+                operations: .init(),
+                worklineAction: .startNew,
+                worklineID: "project-second",
+                worklineTitle: "Second",
+                worklineObjective: "Advance an independent scope",
+                branchFromWorklineID: firstTask.id,
+                isParallel: false,
+                nextFocusedWorklineID: "",
+                closureDisposition: .none,
+                carryoverTitle: "",
+                carryoverSummary: "",
+                carryoverQuestions: [],
+                taskStartEventID: "second-start",
+                contextPatch: nil
+            )
+            _ = try WorkstateService(repository: repository).applyIngestionChanges(
+                projectID: project.id,
+                changes: [change]
+            )
+            let updated = try repository.load().project(id: project.id)
+            try require(
+                updated?.task(id: firstTask.id)?.status == .active,
+                "focus switch does not complete the previous workline"
+            )
+            try require(
+                updated?.focusedTaskID == "project-second",
+                "focus switch selects the new workline"
+            )
+        }
+    }
+
+    private static func completedBatchMetadataIsPruned() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-batch-prune-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("sessions"),
+            runtimeRoot: root
+        )
+        let segmentIDs = ["segment-a", "segment-b"]
+        try scanner.replacePending(segmentIDs: segmentIDs)
+        let route = RouteResult(
+            action: "switch_project",
+            projectId: "project",
+            projectName: "Project",
+            projectSummary: "Summary",
+            confidence: 1,
+            reason: "Matched"
+        )
+        try scanner.recordRouteResults([
+            segmentIDs[0]: route,
+            segmentIDs[1]: route
+        ])
+        try scanner.beginProcessing(segmentIDs: segmentIDs, stage: .stewarding)
+        try scanner.recordStewardBatch(
+            id: "batch",
+            projectID: "project",
+            segmentIDs: segmentIDs,
+            result: BatchStewardResult(changes: [])
+        )
+        let pending = try scanner.loadState()
+        try require(pending.processingRecords?.count == 2, "active batch keeps recovery records")
+        try require(pending.stewardBatches?.count == 1, "active batch result is stored once")
+
+        do {
+            try scanner.commitProcessed([
+                ProcessedSegmentRoute(
+                    segmentID: segmentIDs[0],
+                    threadID: "thread",
+                    turnID: "turn-a",
+                    projectID: "project"
+                )
+            ])
+            throw CheckFailure.failed("partial batch commit must fail")
+        } catch let error as WorkstateStorageError {
+            guard case .invalidState(let message) = error else { throw error }
+            try require(message.contains("one unit"), "partial batch commit diagnostic")
+        }
+
+        try scanner.commitProcessed([
+            ProcessedSegmentRoute(
+                segmentID: segmentIDs[0],
+                threadID: "thread",
+                turnID: "turn-a",
+                projectID: "project"
+            ),
+            ProcessedSegmentRoute(
+                segmentID: segmentIDs[1],
+                threadID: "thread",
+                turnID: "turn-b",
+                projectID: "project"
+            )
+        ])
+        let completed = try scanner.loadState()
+        try require(completed.pendingSegmentIDs.isEmpty, "completed batch leaves no pending ids")
+        try require(completed.processingRecords?.isEmpty != false, "completed records are pruned")
+        try require(completed.stewardBatches?.isEmpty != false, "completed batch payload is pruned")
+    }
+
+    private static func previousActivityDaySkipsCalendarGaps() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-brief-day-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let friday = calendar.date(
+            from: DateComponents(year: 2026, month: 7, day: 17, hour: 12)
+        )!
+        let monday = calendar.date(
+            from: DateComponents(year: 2026, month: 7, day: 20, hour: 10)
+        )!
+        let project = ProjectRecord(
+            id: "project",
+            name: "Project",
+            summary: "Summary",
+            createdAt: friday,
+            updatedAt: friday,
+            lastActivityAt: friday,
+            events: [
+                ProjectEvent(
+                    id: "friday-progress",
+                    timestamp: friday,
+                    title: "Friday progress",
+                    summary: "A real workday",
+                    kind: .implementation,
+                    loopStage: .implementation
+                )
+            ]
+        )
+        let workspace = WorkspaceSnapshot(updatedAt: friday, projects: [project])
+        let briefs = DailyBriefRepository(root: root)
+        let fridayBrief = try briefs.brief(
+            for: friday,
+            workspace: workspace,
+            calendar: calendar
+        )
+        _ = try briefs.applyNarrative(
+            DailyBriefNarrative(
+                sourceRevision: fridayBrief.sourceRevision,
+                overview: "Friday summary",
+                projectSummaries: [
+                    DailyProjectNarrative(projectID: project.id, summary: "Friday progress")
+                ],
+                nextStep: ""
+            ),
+            to: fridayBrief.dateKey
+        )
+        let composer = BriefCompositionService(
+            repository: briefs,
+            runtime: AgentRuntimeClient(
+                runtimeScript: root.appendingPathComponent("missing-runtime.js"),
+                nodePath: "/missing/node",
+                runtimeRoot: root
+            ),
+            scanner: CodexSessionScanner(
+                sessionsRoot: root.appendingPathComponent("sessions"),
+                runtimeRoot: root
+            )
+        )
+        let result = try composer.refreshPreviousActivityDay(
+            workspace: workspace,
+            now: monday,
+            calendar: calendar
+        )
+        try require(result?.dateKey == fridayBrief.dateKey, "daily brief selects the latest real activity day")
     }
 
     private static func projectTimelineHierarchy() throws {
@@ -2266,6 +4226,12 @@ struct WorkstateChecks {
     private static func require(_ condition: @autoclosure () -> Bool, _ label: String) throws {
         guard condition() else { throw CheckFailure.failed(label) }
     }
+}
+
+private struct TestBatchOutcomeRecord: Codable {
+    var batchID: String
+    var createdAt: Date
+    var plan: ConversationBatchCommitPlan
 }
 
 private final class WatcherCapture: @unchecked Sendable {

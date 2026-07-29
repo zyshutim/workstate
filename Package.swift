@@ -16,12 +16,16 @@ let package = Package(
         .executable(name: "WorkstatePreview", targets: ["WorkstatePreview"]),
         .executable(name: "WorkstateChecks", targets: ["WorkstateChecks"]),
         .executable(name: "WorkstateSnapshot", targets: ["WorkstateSnapshot"]),
-        .executable(name: "WorkstateDaemon", targets: ["WorkstateDaemon"]),
-        .executable(name: "WorkstateRebuild", targets: ["WorkstateRebuild"]),
-        .executable(name: "WorkstateMigrateV4", targets: ["WorkstateMigrateV4"])
+        .executable(name: "WorkstateMigrateV4", targets: ["WorkstateMigrateV4"]),
+        .executable(name: "WorkstateMigrateV10", targets: ["WorkstateMigrateV10"])
     ],
     targets: [
-        .target(name: "WorkstateCore"),
+        .target(
+            name: "WorkstateCore",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
+        ),
         .target(
             name: "WorkstateIngestion",
             dependencies: ["WorkstateCore"]
@@ -51,15 +55,11 @@ let package = Package(
             dependencies: ["WorkstateCore", "WorkstateUI"]
         ),
         .executableTarget(
-            name: "WorkstateDaemon",
-            dependencies: ["WorkstateCore", "WorkstateIngestion"]
-        ),
-        .executableTarget(
-            name: "WorkstateRebuild",
-            dependencies: ["WorkstateCore", "WorkstateIngestion"]
-        ),
-        .executableTarget(
             name: "WorkstateMigrateV4",
+            dependencies: ["WorkstateCore", "WorkstateIngestion"]
+        ),
+        .executableTarget(
+            name: "WorkstateMigrateV10",
             dependencies: ["WorkstateCore", "WorkstateIngestion"]
         )
     ]

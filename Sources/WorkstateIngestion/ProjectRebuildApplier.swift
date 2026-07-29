@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import WorkstateCore
 
@@ -173,6 +174,39 @@ public struct ProjectRebuildApplier: Sendable {
                     sourceIDs: sourceIDs(item.evidenceIds)
                 )
             }
+            let topics = validated.topics.map { item in
+                let topicSourceIDs = sourceIDs(item.value.evidenceIds)
+                let timestamp = latestEvidenceDate(
+                    item.value.evidenceIds,
+                    evidenceByID: evidenceByID
+                ) ?? latestDate
+                return ProjectTopic(
+                    id: item.value.id,
+                    title: item.value.title,
+                    summary: item.value.summary,
+                    status: .captured,
+                    kind: item.kind,
+                    disposition: item.disposition,
+                    currentUnderstanding: item.value.currentUnderstanding,
+                    proposedDirection: item.value.proposedDirection,
+                    deferredReason: item.value.deferredReason,
+                    revisitTrigger: item.value.revisitTrigger,
+                    openQuestions: item.value.openQuestions,
+                    notes: [
+                        ProjectTopicNote(
+                            id: "rebuild-topic-note-\(item.value.id)",
+                            timestamp: timestamp,
+                            kind: .origin,
+                            title: "由历史证据恢复",
+                            detail: item.value.summary,
+                            sourceIDs: topicSourceIDs
+                        )
+                    ],
+                    sourceIDs: topicSourceIDs,
+                    createdAt: timestamp,
+                    updatedAt: timestamp
+                )
+            }
             let allSourceIDs = sourceIDs(validated.referencedEvidenceIDs)
             let context = ProjectContext(
                 currentSummary: proposal.currentSummary,
@@ -197,8 +231,7 @@ public struct ProjectRebuildApplier: Sendable {
                 ],
                 objectModel: proposal.objectModel.map(\.text),
                 acceptedDecisions: acceptedDecisions,
-                forbiddenDirections: proposal.forbiddenDirections.map(\.text),
-                openIssues: proposal.openIssues.map(\.text)
+                forbiddenDirections: proposal.forbiddenDirections.map(\.text)
             )
 
             snapshot.projects[projectIndex] = ProjectRecord(
@@ -214,6 +247,7 @@ public struct ProjectRebuildApplier: Sendable {
                 context: context,
                 tasks: tasks,
                 events: events.sorted { $0.timestamp < $1.timestamp },
+                topics: topics,
                 sourceIDs: allSourceIDs
             )
         }
@@ -249,7 +283,7 @@ public struct ProjectRebuildApplier: Sendable {
         allEvidenceIDs.append(contentsOf: proposal.acceptedDecisions.flatMap(\.evidenceIds))
         allEvidenceIDs.append(contentsOf: proposal.objectModel.flatMap(\.evidenceIds))
         allEvidenceIDs.append(contentsOf: proposal.forbiddenDirections.flatMap(\.evidenceIds))
-        allEvidenceIDs.append(contentsOf: proposal.openIssues.flatMap(\.evidenceIds))
+        allEvidenceIDs.append(contentsOf: proposal.topics.flatMap(\.evidenceIds))
         allEvidenceIDs.append(contentsOf: proposal.worklines.flatMap(\.evidenceIds))
         allEvidenceIDs.append(contentsOf: proposal.deltas.flatMap(\.evidenceIds))
         guard !allEvidenceIDs.isEmpty else {
@@ -270,8 +304,21 @@ public struct ProjectRebuildApplier: Sendable {
         for item in proposal.forbiddenDirections where item.evidenceIds.isEmpty {
             throw WorkstateStorageError.invalidState("Forbidden direction has no evidence: \(item.text)")
         }
-        for item in proposal.openIssues where item.evidenceIds.isEmpty {
-            throw WorkstateStorageError.invalidState("Open issue has no evidence: \(item.text)")
+        let parsedTopics = try proposal.topics.map { value -> ParsedTopic in
+            guard value.id.hasPrefix("\(proposal.projectId)-"),
+                  !value.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !value.currentUnderstanding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !value.evidenceIds.isEmpty,
+                  let kind = ProjectTopicKind(rawValue: value.kind),
+                  let disposition = ProjectTopicDisposition(rawValue: value.disposition) else {
+                throw WorkstateStorageError.invalidState(
+                    "Invalid rebuilt topic: \(value.id)"
+                )
+            }
+            return ParsedTopic(value: value, kind: kind, disposition: disposition)
+        }
+        guard Set(proposal.topics.map(\.id)).count == proposal.topics.count else {
+            throw WorkstateStorageError.invalidState("Rebuild proposal contains duplicate topic ids")
         }
 
         let parsedWorklines = try proposal.worklines.map { value -> ParsedWorkline in
@@ -352,6 +399,7 @@ public struct ProjectRebuildApplier: Sendable {
         let latestDate = (parsedDeltas.map(\.timestamp) + parsedWorklines.map(\.updatedAt)).max() ?? Date()
         return ValidatedProposal(
             projectStatus: projectStatus,
+            topics: parsedTopics,
             worklines: parsedWorklines,
             deltas: parsedDeltas,
             referencedEvidenceIDs: Array(Set(allEvidenceIDs)).sorted(),
@@ -375,12 +423,17 @@ public struct ProjectRebuildApplier: Sendable {
             locator: "codex://threads/\(segment.threadID)",
             threadID: segment.threadID,
             turnIDs: [segment.turnID],
-            excerpt: [
-                ConversationMessage(role: "user", text: segment.userText, timestamp: segment.timestamp),
-                ConversationMessage(role: "assistant", text: segment.assistantText, timestamp: segment.timestamp)
-            ],
-            contentHash: segment.id
+            contentHash: sourceContentHash(segment),
+            provider: "codex",
+            startOffset: segment.startOffset,
+            endOffset: segment.endOffset,
+            messageSpans: segment.sourceSpans
         )
+    }
+
+    private func sourceContentHash(_ segment: SessionSegment) -> String {
+        let data = Data("\(segment.userText)\u{0}\(segment.assistantText)".utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func sourceID(_ segment: SessionSegment) -> String {
@@ -419,6 +472,12 @@ private struct ParsedWorkline {
     var completedAt: Date?
 }
 
+private struct ParsedTopic {
+    var value: RebuildTopic
+    var kind: ProjectTopicKind
+    var disposition: ProjectTopicDisposition
+}
+
 private struct ParsedDelta {
     var value: RebuildDelta
     var kind: EventKind
@@ -429,6 +488,7 @@ private struct ParsedDelta {
 
 private struct ValidatedProposal {
     var projectStatus: ProjectStatus
+    var topics: [ParsedTopic]
     var worklines: [ParsedWorkline]
     var deltas: [ParsedDelta]
     var referencedEvidenceIDs: [String]

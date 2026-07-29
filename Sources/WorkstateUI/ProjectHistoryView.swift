@@ -365,15 +365,14 @@ private struct ProjectContextSection: View {
 
     private var expandedContextContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            ContextBlock(title: "项目目的", values: [project.context.purpose])
-            ContextBlock(title: "开放问题", values: project.context.openIssues)
+            ContextBlock(title: "项目目标", values: [project.context.purpose])
+            ContextUnderstandingSection(statements: project.context.understanding)
 
             Rectangle()
                 .fill(WorkstateTheme.separator.opacity(0.64))
                 .frame(height: 0.5)
 
-            ContextUnderstandingSection(statements: project.context.understanding)
-
+            ContextRevisionSection(revisions: project.context.revisions)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
@@ -382,7 +381,7 @@ private struct ProjectContextSection: View {
 
     private var expandedContextSnapshotContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ContextBlock(title: "项目目的", values: [project.context.purpose])
+            ContextBlock(title: "项目目标", values: [project.context.purpose])
             Rectangle()
                 .fill(WorkstateTheme.separator.opacity(0.64))
                 .frame(height: 0.5)
@@ -457,13 +456,19 @@ private struct ContextRevisionRow: View {
 private struct ContextUnderstandingSection: View {
     let statements: [ContextStatement]
 
+    private var activeStatements: [ContextStatement] {
+        statements.filter {
+            $0.status == .confirmed || $0.status == .observed || $0.status == .inferred
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("当前有效理解")
+            Text("核心认知")
                 .font(WorkstateTheme.captionEmphasisFont)
                 .foregroundStyle(WorkstateTheme.secondaryLabel)
 
-            ForEach(statements) { statement in
+            ForEach(activeStatements) { statement in
                 HStack(alignment: .top, spacing: 9) {
                     Circle()
                         .fill(statement.status.color)
@@ -478,6 +483,26 @@ private struct ContextUnderstandingSection: View {
                             .foregroundStyle(WorkstateTheme.tertiaryLabel)
                     }
                 }
+            }
+        }
+    }
+}
+
+private struct ContextRevisionSection: View {
+    let revisions: [ContextRevision]
+
+    private var latestFirst: [ContextRevision] {
+        revisions.sorted { $0.timestamp > $1.timestamp }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("理解更新")
+                .font(WorkstateTheme.captionEmphasisFont)
+                .foregroundStyle(WorkstateTheme.secondaryLabel)
+
+            ForEach(latestFirst) { revision in
+                ContextRevisionRow(revision: revision)
             }
         }
     }
@@ -776,18 +801,28 @@ private struct LiveActivityNode: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            ProgressView()
-                .controlSize(.small)
-                .tint(accent)
-                .frame(width: TimelineNodeLayout.hitSize, height: TimelineNodeLayout.hitSize)
-                .offset(x: nodeX - TimelineNodeLayout.hitSize / 2)
+            Group {
+                if activity.phase == .active {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(accent)
+                } else {
+                    Image(systemName: "clock")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(accent)
+                }
+            }
+            .frame(width: TimelineNodeLayout.hitSize, height: TimelineNodeLayout.hitSize)
+            .offset(x: nodeX - TimelineNodeLayout.hitSize / 2)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(activity.title)
                     .font(WorkstateTheme.secondaryFont.weight(.semibold))
                     .foregroundStyle(WorkstateTheme.primaryLabel)
                     .lineLimit(1)
-                Text(WorkstateDateText.compact(activity.updatedAt))
+                Text(activity.phase == .active
+                    ? WorkstateDateText.compact(activity.updatedAt)
+                    : "待整理 · \(WorkstateDateText.compact(activity.updatedAt))")
                     .font(WorkstateTheme.microFont.monospacedDigit())
                     .foregroundStyle(accent)
             }
@@ -799,7 +834,9 @@ private struct LiveActivityNode: View {
             alignment: .leading
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("正在进行，\(activity.title)")
+        .accessibilityLabel(
+            activity.phase == .active ? "正在进行，\(activity.title)" : "待整理，\(activity.title)"
+        )
     }
 }
 

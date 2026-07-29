@@ -145,7 +145,7 @@ struct ProjectGraphView: View {
                         }
                     }
 
-                    DaemonStatusIndicator(daemon: model.daemonStatus)
+                    RuntimeStatusIndicator(runtime: model.runtimeStatus)
 
                     Text(WorkstateDateText.relative(model.workspace.updatedAt))
                         .font(WorkstateTheme.captionFont.monospacedDigit())
@@ -186,9 +186,12 @@ struct ProjectGraphView: View {
                         action: model.presentSettings
                     )
                     GraphToolbarButton(
-                        systemName: "arrow.clockwise",
-                        accessibilityLabel: "刷新",
-                        action: { model.reload(force: true) }
+                        systemName: model.isManualSyncing
+                            ? "ellipsis"
+                            : "arrow.triangle.2.circlepath",
+                        accessibilityLabel: model.isManualSyncing ? "正在同步" : "立即同步",
+                        isEnabled: !model.isManualSyncing,
+                        action: model.syncNow
                     )
                 }
                 .padding(.horizontal, 5)
@@ -457,8 +460,8 @@ struct ProjectGraphView: View {
     }
 }
 
-private struct DaemonStatusIndicator: View {
-    let daemon: DaemonSnapshot
+private struct RuntimeStatusIndicator: View {
+    let runtime: RuntimeSnapshot
 
     var body: some View {
         HStack(spacing: 4) {
@@ -466,7 +469,7 @@ private struct DaemonStatusIndicator: View {
                 .fill(color)
                 .frame(width: 7, height: 7)
                 .overlay {
-                    if daemon.activity == .analyzing || daemon.activity == .scanning {
+                    if runtime.activity == .analyzing || runtime.activity == .scanning {
                         Circle()
                             .stroke(color.opacity(0.35), lineWidth: 3)
                             .frame(width: 13, height: 13)
@@ -479,25 +482,27 @@ private struct DaemonStatusIndicator: View {
     }
 
     private var color: Color {
-        switch daemon.activity {
+        switch runtime.activity {
         case .idle: WorkstateTheme.success
         case .scanning, .analyzing: WorkstateTheme.activeState
-        case .paused, .stopped: WorkstateTheme.tertiaryLabel
+        case .stopped: WorkstateTheme.tertiaryLabel
         case .failed: WorkstateTheme.danger
         }
     }
 
     private var helpText: String {
         let state: String
-        switch daemon.activity {
+        switch runtime.activity {
         case .stopped: state = "同步未运行"
         case .idle: state = "同步监听中"
         case .scanning: state = "正在扫描会话"
         case .analyzing: state = "正在分析项目变化"
-        case .paused: state = "同步已暂停"
         case .failed: state = "同步发生错误"
         }
-        return daemon.detail.isEmpty ? state : "\(state) · \(daemon.detail)"
+        let unbound = runtime.unboundConversationCount > 0
+            ? " · \(runtime.unboundConversationCount) 个会话未归属"
+            : ""
+        return runtime.detail.isEmpty ? state + unbound : "\(state) · \(runtime.detail)\(unbound)"
     }
 }
 

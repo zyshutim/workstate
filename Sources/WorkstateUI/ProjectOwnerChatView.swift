@@ -135,13 +135,16 @@ struct ProjectOwnerChatView: View {
                 .font(WorkstateTheme.bodyFont)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !project.context.openIssues.isEmpty {
+            let openTopics = project.topics
+                .filter { $0.status == .captured || $0.status == .discussing }
+                .sorted { $0.updatedAt > $1.updatedAt }
+            if !openTopics.isEmpty {
                 Divider()
-                Text("当前开放问题")
+                Text("待讨论议题")
                     .font(WorkstateTheme.captionEmphasisFont)
                     .foregroundStyle(WorkstateTheme.secondaryLabel)
-                ForEach(project.context.openIssues.prefix(3), id: \.self) { issue in
-                    Label(issue, systemImage: "circle")
+                ForEach(openTopics.prefix(3)) { topic in
+                    Label(topic.title, systemImage: "circle")
                         .labelStyle(OwnerIssueLabelStyle())
                         .font(WorkstateTheme.captionFont)
                 }

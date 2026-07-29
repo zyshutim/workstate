@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WorkstateCore
+import WorkstateIngestion
 
 struct ReviewInboxPopover: View {
     @ObservedObject var model: WorkstateViewModel
@@ -243,10 +244,12 @@ private struct ReviewTextSection: View {
 
 struct ConversationEvidence: View {
     let source: SourceReference
+    @State private var resolvedMessages: [ConversationMessage] = []
+    @State private var resolutionError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(source.excerpt) { message in
+            ForEach(messages) { message in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(message.role == "user" ? "你" : "Codex")
                         .font(WorkstateTheme.microFont)
@@ -272,6 +275,15 @@ struct ConversationEvidence: View {
                 }
             }
 
+            if messages.isEmpty, resolutionError == nil {
+                ProgressView()
+                    .controlSize(.small)
+            } else if let resolutionError {
+                Text(resolutionError)
+                    .font(WorkstateTheme.microFont)
+                    .foregroundStyle(WorkstateTheme.secondaryLabel)
+            }
+
             if let url = sourceURL {
                 Link(destination: url) {
                     Label("打开原始对话", systemImage: "arrow.up.forward.app")
@@ -279,6 +291,22 @@ struct ConversationEvidence: View {
                 }
             }
         }
+        .task(id: source.id) {
+            do {
+                let source = source
+                resolvedMessages = try await Task.detached {
+                    try CodexSessionScanner().resolveMessages(for: source)
+                }.value
+                resolutionError = nil
+            } catch {
+                resolvedMessages = []
+                resolutionError = error.localizedDescription
+            }
+        }
+    }
+
+    private var messages: [ConversationMessage] {
+        source.excerpt.isEmpty ? resolvedMessages : source.excerpt
     }
 
     private var sourceURL: URL? {
