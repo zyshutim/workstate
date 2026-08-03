@@ -211,6 +211,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
     public var focusedTaskID: String?
     public var tasks: [TaskRecord]
     public var events: [ProjectEvent]
+    public var turningPoints: [ProjectTimelineTurningPoint]?
     public var topics: [ProjectTopic]
     public var sourceIDs: [String]
 
@@ -228,6 +229,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
         focusedTaskID: String? = nil,
         tasks: [TaskRecord] = [],
         events: [ProjectEvent] = [],
+        turningPoints: [ProjectTimelineTurningPoint]? = nil,
         topics: [ProjectTopic] = [],
         sourceIDs: [String] = []
     ) {
@@ -244,6 +246,7 @@ public struct ProjectRecord: Codable, Equatable, Identifiable, Sendable {
         self.focusedTaskID = focusedTaskID
         self.tasks = tasks
         self.events = events
+        self.turningPoints = turningPoints
         self.topics = topics
         self.sourceIDs = sourceIDs
     }
@@ -383,6 +386,7 @@ public struct ProjectRelation: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct ProjectContext: Codable, Equatable, Sendable {
+    public var cognition: ProjectCognitionDocument?
     public var currentSummary: String
     public var purpose: String
     public var inScope: [String]
@@ -394,6 +398,7 @@ public struct ProjectContext: Codable, Equatable, Sendable {
     public var forbiddenDirections: [String]
 
     public init(
+        cognition: ProjectCognitionDocument? = nil,
         currentSummary: String = "",
         purpose: String = "",
         inScope: [String] = [],
@@ -404,6 +409,7 @@ public struct ProjectContext: Codable, Equatable, Sendable {
         acceptedDecisions: [DecisionRecord] = [],
         forbiddenDirections: [String] = []
     ) {
+        self.cognition = cognition
         self.currentSummary = currentSummary
         self.purpose = purpose
         self.inScope = inScope

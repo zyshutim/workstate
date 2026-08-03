@@ -121,7 +121,8 @@ public struct WorkstateOrchestrator: Sendable {
         let changes = try makeIngestionChanges(
             batchResult.changes,
             segments: ordered,
-            projectID: projectID
+            projectID: projectID,
+            project: project
         )
         let routes = ordered.map {
             ProcessedSegmentRoute(
@@ -384,7 +385,8 @@ public struct WorkstateOrchestrator: Sendable {
                 stagedChanges.append(contentsOf: try makeIngestionChanges(
                     batchResult.changes,
                     segments: projectSegments,
-                    projectID: project.id
+                    projectID: project.id,
+                    project: project
                 ))
                 stagedRoutes.append(contentsOf: projectRoutes.map {
                     ProcessedSegmentRoute(
@@ -523,10 +525,14 @@ public struct WorkstateOrchestrator: Sendable {
         segments: [SessionSegment],
         projectID: String
     ) throws {
+        guard let project = try service.snapshot().project(id: projectID) else {
+            throw WorkstateStorageError.missingProject(projectID)
+        }
         let inputs = try makeIngestionChanges(
             changes,
             segments: segments,
-            projectID: projectID
+            projectID: projectID,
+            project: project
         )
         if !inputs.isEmpty {
             _ = try service.applyIngestionChanges(projectID: projectID, changes: inputs)
@@ -536,7 +542,8 @@ public struct WorkstateOrchestrator: Sendable {
     private func makeIngestionChanges(
         _ changes: [BatchStewardChange],
         segments: [SessionSegment],
-        projectID: String
+        projectID: String,
+        project: ProjectRecord
     ) throws -> [IngestionProjectChange] {
         guard !changes.isEmpty else { return [] }
         let byID = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0) })
@@ -555,6 +562,7 @@ public struct WorkstateOrchestrator: Sendable {
                 from: change.result,
                 evidence: evidence,
                 projectID: projectID,
+                project: project,
                 semanticDiscriminator: try semanticDiscriminator(for: change)
             )
         }
@@ -564,6 +572,7 @@ public struct WorkstateOrchestrator: Sendable {
         from result: StewardResult,
         evidence: [SessionSegment],
         projectID: String,
+        project: ProjectRecord,
         semanticDiscriminator: String
     ) throws -> IngestionProjectChange {
         guard result.classification == "ordinary_delta",
@@ -578,50 +587,21 @@ public struct WorkstateOrchestrator: Sendable {
             throw WorkstateStorageError.invalidState("Steward returned an unsupported state")
         }
 
-        let contextPatch: IngestionContextPatch?
-        if let patch = result.contextPatch, !patch.isEmpty {
-            guard let revisionStatus = EvidenceStatus(rawValue: patch.revisionStatus) else {
-                throw WorkstateStorageError.invalidState(
-                    "Steward returned an unsupported context authority"
-                )
-            }
-            contextPatch = IngestionContextPatch(
-                currentSummary: patch.currentSummary,
-                revisionID: stableID(
-                    prefix: "context-revision",
-                    segments: evidence,
-                    discriminator: semanticDiscriminator
-                ),
-                revisionTitle: patch.revisionTitle,
-                revisionSummary: patch.revisionSummary,
-                revisionStatus: revisionStatus,
-                changes: patch.changes,
-                understandingUpserts: try patch.understandingUpserts.map {
-                    guard let status = EvidenceStatus(rawValue: $0.status) else {
-                        throw WorkstateStorageError.invalidState(
-                            "Steward returned an unsupported understanding authority"
-                        )
-                    }
-                    return IngestionUnderstandingMutation(
-                        id: $0.id,
-                        text: $0.text,
-                        status: status
-                    )
-                },
-                supersededUnderstandingIDs: patch.supersededUnderstandingIds,
-                decisionUpserts: patch.decisionUpserts.map {
-                    IngestionDecisionMutation(
-                        id: $0.id,
-                        text: $0.text,
-                        rationale: $0.rationale
-                    )
-                },
-                supersededDecisionIDs: patch.supersededDecisionIds,
-                forbiddenDirectionAdditions: patch.forbiddenDirectionAdditions,
-                forbiddenDirectionRemovals: patch.forbiddenDirectionRemovals
+        // Legacy contextPatch remains part of the runtime envelope for old callers,
+        // but never becomes an automatic ProjectContext mutation.
+        let contextPatch: IngestionContextPatch? = nil
+
+        let cognitionRevision: ProjectCognitionRevision?
+        if let proposal = result.cognitionProposal, !proposal.isEmpty {
+            let sourceIDs = evidence.map { evidenceSource($0).id }
+            cognitionRevision = try ProjectCognitionProposalMapper().map(
+                proposal,
+                project: project,
+                sourceIDs: sourceIDs,
+                timestamp: latest.timestamp
             )
         } else {
-            contextPatch = nil
+            cognitionRevision = nil
         }
 
         let sourceIDs = evidence.map { evidenceSource($0).id }
@@ -657,12 +637,23 @@ public struct WorkstateOrchestrator: Sendable {
             )
         }
 
+        let changeID = stableID(
+            prefix: "delta",
+            segments: evidence,
+            discriminator: semanticDiscriminator
+        )
+        let turningPoint = try timelineTurningPoint(
+            from: result.turningPoint,
+            result: result,
+            project: project,
+            projectID: projectID,
+            changeID: changeID,
+            sourceIDs: sourceIDs,
+            timestamp: latest.timestamp
+        )
+
         return IngestionProjectChange(
-            id: stableID(
-                prefix: "delta",
-                segments: evidence,
-                discriminator: semanticDiscriminator
-            ),
+            id: changeID,
             projectID: projectID,
             timestamp: latest.timestamp,
             sources: evidence.map(evidenceSource),
@@ -690,7 +681,52 @@ public struct WorkstateOrchestrator: Sendable {
                 discriminator: semanticDiscriminator
             ),
             contextPatch: contextPatch,
+            cognitionRevision: cognitionRevision,
+            turningPoint: turningPoint,
             topicUpserts: topicUpserts
+        )
+    }
+
+    private func timelineTurningPoint(
+        from output: StewardTurningPoint?,
+        result: StewardResult,
+        project: ProjectRecord,
+        projectID: String,
+        changeID: String,
+        sourceIDs: [String],
+        timestamp: Date
+    ) throws -> ProjectTimelineTurningPoint? {
+        guard let output, !output.isEmpty else { return nil }
+        guard let scope = ProjectTimelineTurningPointScope(rawValue: output.scope) else {
+            throw WorkstateStorageError.invalidState(
+                "Steward returned an unsupported timeline turning-point scope"
+            )
+        }
+        let worklineID = result.worklineId.trimmingCharacters(in: .whitespacesAndNewlines)
+        var knownWorklineIDs = project.tasks.map(\.id)
+        if result.worklineAction == "start_new", !worklineID.isEmpty {
+            knownWorklineIDs.append(worklineID)
+        }
+        let proposal = ProjectTimelineTurningPointProposal(
+            id: "turning-point-\(digest(changeID))",
+            projectID: projectID,
+            worklineID: worklineID.isEmpty ? nil : worklineID,
+            title: output.title,
+            beforeMeaning: output.beforeMeaning,
+            afterMeaning: output.afterMeaning,
+            scope: scope,
+            timestamp: timestamp,
+            sourceIDs: Array(Set(sourceIDs)).sorted(),
+            originatingChangeID: changeID
+        )
+        return try ProjectTimelineTurningPointMapper().map(
+            proposal,
+            in: ProjectTimelineTurningPointValidationContext(
+                projectID: projectID,
+                worklineIDs: knownWorklineIDs,
+                changeIDs: [changeID],
+                sourceIDs: sourceIDs
+            )
         )
     }
 

@@ -236,6 +236,19 @@ public struct WorkstateRepository: Sendable {
             guard eventIDs.count == project.events.count else {
                 throw WorkstateStorageError.invalidState("Duplicate event id in \(project.id)")
             }
+            let turningPoints = project.turningPoints ?? []
+            let turningPointIDs = Set(turningPoints.map(\.id))
+            guard turningPointIDs.count == turningPoints.count else {
+                throw WorkstateStorageError.invalidState(
+                    "Duplicate timeline turning-point id in \(project.id)"
+                )
+            }
+            let turningPointChangeIDs = Set(turningPoints.map(\.originatingChangeID))
+            guard turningPointChangeIDs.count == turningPoints.count else {
+                throw WorkstateStorageError.invalidState(
+                    "One project change cannot own multiple timeline turning points in \(project.id)"
+                )
+            }
             if let focusedTaskID = project.focusedTaskID {
                 guard let focusedTask = project.tasks.first(where: { $0.id == focusedTaskID }) else {
                     throw WorkstateStorageError.invalidState("Project \(project.id) focuses an unknown task")
@@ -259,6 +272,11 @@ public struct WorkstateRepository: Sendable {
             for revision in project.context.revisions {
                 try validateSourceIDs(revision.sourceIDs, known: sourceIDs, owner: "revision \(revision.id)")
             }
+            try ProjectCognitionValidation.validate(
+                project.context.cognition,
+                knownSourceIDs: sourceIDs,
+                projectID: project.id
+            )
             for task in project.tasks {
                 guard eventIDs.contains(task.branchedFromEventID) else {
                     throw WorkstateStorageError.invalidState("Task \(task.id) has an unknown branch point")
@@ -292,6 +310,49 @@ public struct WorkstateRepository: Sendable {
                 for decision in event.decisions {
                     try validateSourceIDs(decision.sourceIDs, known: sourceIDs, owner: "decision \(decision.id)")
                 }
+            }
+            for turningPoint in turningPoints {
+                guard turningPoint.projectID == project.id else {
+                    throw WorkstateStorageError.invalidState(
+                        "Timeline turning point \(turningPoint.id) references the wrong project"
+                    )
+                }
+                guard eventIDs.contains(turningPoint.originatingChangeID) else {
+                    throw WorkstateStorageError.invalidState(
+                        "Timeline turning point \(turningPoint.id) references an unknown change"
+                    )
+                }
+                if let worklineID = turningPoint.worklineID, !taskIDs.contains(worklineID) {
+                    throw WorkstateStorageError.invalidState(
+                        "Timeline turning point \(turningPoint.id) references an unknown workline"
+                    )
+                }
+                guard !turningPoint.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !turningPoint.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !turningPoint.beforeMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !turningPoint.afterMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      turningPoint.beforeMeaning != turningPoint.afterMeaning,
+                      turningPoint.timestamp.timeIntervalSinceReferenceDate.isFinite,
+                      !turningPoint.sourceIDs.isEmpty else {
+                    throw WorkstateStorageError.invalidState(
+                        "Timeline turning point \(turningPoint.id) has invalid content"
+                    )
+                }
+                if turningPoint.scope == .workline, turningPoint.worklineID == nil {
+                    throw WorkstateStorageError.invalidState(
+                        "Workline turning point \(turningPoint.id) has no workline"
+                    )
+                }
+                guard Set(turningPoint.sourceIDs).count == turningPoint.sourceIDs.count else {
+                    throw WorkstateStorageError.invalidState(
+                        "Timeline turning point \(turningPoint.id) contains duplicate sources"
+                    )
+                }
+                try validateSourceIDs(
+                    turningPoint.sourceIDs,
+                    known: sourceIDs,
+                    owner: "timeline turning point \(turningPoint.id)"
+                )
             }
         }
     }

@@ -56,6 +56,21 @@ enum WorkstateTheme {
     static let microFont = Font.caption2
 }
 
+enum WorkstateReportTokens {
+    static let leadTitleFont = Font.system(size: 18, weight: .semibold)
+    static let sectionTitleFont = Font.system(size: 15, weight: .semibold)
+    static let subsectionTitleFont = Font.system(size: 13, weight: .semibold)
+    static let leadBodyFont = Font.system(size: 15, weight: .regular)
+    static let bodyFont = Font.system(size: 14, weight: .regular)
+    static let metadataFont = Font.system(size: 11, weight: .medium)
+
+    static let leadSectionSpacing: CGFloat = 18
+    static let sectionSpacing: CGFloat = 24
+    static let blockSpacing: CGFloat = 9
+    static let bodyLineSpacing: CGFloat = 5
+    static let listIndent: CGFloat = 18
+}
+
 struct WorkstateGlassContainer<Content: View>: View {
     let content: Content
     @Environment(\.workstateSnapshotRendering) private var snapshotRendering

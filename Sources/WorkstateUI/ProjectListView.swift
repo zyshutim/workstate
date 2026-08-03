@@ -792,7 +792,7 @@ private struct ProjectGraphNode: View {
                 .onChanged { value in onDragChanged(value.translation) }
                 .onEnded { value in onDragEnded(value.translation) }
         )
-        .help(project.context.currentSummary)
+        .help(project.summary)
     }
 
     private var orb: some View {
@@ -819,6 +819,11 @@ private struct ProjectGraphNode: View {
                     .fill(project.status.color(accent: project.accent))
                     .frame(width: 5, height: 5)
                 Text(project.status.displayName)
+                if hasPendingCognition {
+                    Image(systemName: "pencil.line")
+                        .foregroundStyle(WorkstateTheme.warning)
+                        .help("项目认知有待确认修改")
+                }
                 Text("·")
                     .foregroundStyle(WorkstateTheme.tertiaryLabel)
                 Text(WorkstateDateText.relative(project.lastActivityAt))
@@ -842,6 +847,11 @@ private struct ProjectGraphNode: View {
 
     private var latestTitle: String {
         project.latestEvent?.title ?? project.summary
+    }
+
+    private var hasPendingCognition: Bool {
+        project.context.cognition?.state == .draft
+            || project.context.cognition?.revisions.contains(where: { $0.status == .pending }) == true
     }
 }
 
@@ -940,11 +950,15 @@ private struct ProjectNodeOrb: View {
         )
         .animation(.timingCurve(0.25, 1, 0.5, 1, duration: 0.16), value: isHovered)
         .animation(.easeOut(duration: 0.12), value: isDragging)
-        .onAppear {
+        .task(id: status) {
+            pulse = false
             guard status == .active, !reduceMotion, !snapshotRendering else { return }
-            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.65)) {
                 pulse = true
             }
+            try? await Task.sleep(for: .milliseconds(650))
+            pulse = false
         }
     }
 }
@@ -977,7 +991,7 @@ private struct ProjectHoverSummary: View {
     }
 
     private var summary: String {
-        project.context.currentSummary.isEmpty ? project.summary : project.context.currentSummary
+        project.summary
     }
 }
 

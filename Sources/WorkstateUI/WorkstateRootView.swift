@@ -1,9 +1,7 @@
-import Combine
 import SwiftUI
 
 public struct WorkstateRootView: View {
     @ObservedObject private var model: WorkstateViewModel
-    private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     public init(model: WorkstateViewModel) {
         self.model = model
@@ -77,7 +75,7 @@ public struct WorkstateRootView: View {
                 .padding(.bottom, 100)
             }
         }
-        .onReceive(refreshTimer) { _ in
+        .onAppear {
             model.reload()
         }
         .animation(.easeInOut(duration: 0.18), value: model.preferredWidth)

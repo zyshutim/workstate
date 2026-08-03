@@ -18,5 +18,13 @@ struct WorkstateMenuBarApp: App {
                 .accessibilityLabel("工作状态")
         }
         .menuBarExtraStyle(.window)
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("停止服务并退出") {
+                    model.stopServiceAndExit()
+                }
+                .keyboardShortcut("q")
+            }
+        }
     }
 }

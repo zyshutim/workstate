@@ -502,6 +502,23 @@ public struct WorkstateService: Sendable {
                     snapshot.projects[projectIndex].context.acceptedDecisions[decisionIndex].sourceIDs
                         .removeAll(where: sourceIDs.contains)
                 }
+                if var cognition = snapshot.projects[projectIndex].context.cognition {
+                    for sectionIndex in cognition.sections.indices {
+                        cognition.sections[sectionIndex].sourceIDs.removeAll(where: sourceIDs.contains)
+                    }
+                    for revisionIndex in cognition.revisions.indices {
+                        cognition.revisions[revisionIndex].sourceIDs.removeAll(where: sourceIDs.contains)
+                        for sectionIndex in cognition.revisions[revisionIndex].beforeSections.indices {
+                            cognition.revisions[revisionIndex].beforeSections[sectionIndex].sourceIDs
+                                .removeAll(where: sourceIDs.contains)
+                        }
+                        for sectionIndex in cognition.revisions[revisionIndex].afterSections.indices {
+                            cognition.revisions[revisionIndex].afterSections[sectionIndex].sourceIDs
+                                .removeAll(where: sourceIDs.contains)
+                        }
+                    }
+                    snapshot.projects[projectIndex].context.cognition = cognition
+                }
                 for taskIndex in snapshot.projects[projectIndex].tasks.indices {
                     snapshot.projects[projectIndex].tasks[taskIndex].sourceIDs
                         .removeAll(where: sourceIDs.contains)

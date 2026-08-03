@@ -131,9 +131,21 @@ struct ProjectOwnerChatView: View {
 
     private var ownerIntroduction: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(project.context.currentSummary)
-                .font(WorkstateTheme.bodyFont)
-                .fixedSize(horizontal: false, vertical: true)
+            if let cognition = project.context.cognition, cognition.state == .confirmed {
+                ForEach(cognition.sections.sorted(by: { $0.order < $1.order }).prefix(2)) { section in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(section.title)
+                            .font(WorkstateTheme.captionEmphasisFont)
+                        Text(section.body)
+                            .font(WorkstateTheme.bodyFont)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                Text("项目认知尚未建立，Owner 只会使用当前会话和项目识别信息。")
+                    .font(WorkstateTheme.captionFont)
+                    .foregroundStyle(WorkstateTheme.secondaryLabel)
+            }
 
             let openTopics = project.topics
                 .filter { $0.status == .captured || $0.status == .discussing }
@@ -501,161 +513,8 @@ private struct OwnerMessageRow: View {
 struct OwnerMessageContent: View {
     let source: String
 
-    private var blocks: [OwnerMarkdownBlock] {
-        OwnerMarkdownParser.parse(source)
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                blockView(block)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func blockView(_ block: OwnerMarkdownBlock) -> some View {
-        switch block {
-        case let .paragraph(text):
-            Text(inlineMarkdown(text))
-                .font(WorkstateTheme.bodyFont)
-
-        case let .heading(level, text):
-            Text(inlineMarkdown(text))
-                .font(level == 1 ? WorkstateTheme.sectionTitleFont : WorkstateTheme.headlineFont)
-
-        case let .bullet(text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Circle()
-                    .frame(width: 5, height: 5)
-                Text(inlineMarkdown(text))
-                    .font(WorkstateTheme.bodyFont)
-            }
-
-        case let .numbered(number, text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(number).")
-                    .font(WorkstateTheme.captionEmphasisFont.monospacedDigit())
-                    .frame(minWidth: 18, alignment: .trailing)
-                Text(inlineMarkdown(text))
-                    .font(WorkstateTheme.bodyFont)
-            }
-
-        case let .code(text):
-            Text(text)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    WorkstateTheme.primaryLabel.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: WorkstateTheme.smallCornerRadius)
-                )
-        }
-    }
-
-    private func inlineMarkdown(_ text: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
-    }
-}
-
-private enum OwnerMarkdownBlock {
-    case paragraph(String)
-    case heading(Int, String)
-    case bullet(String)
-    case numbered(String, String)
-    case code(String)
-}
-
-private enum OwnerMarkdownParser {
-    static func parse(_ source: String) -> [OwnerMarkdownBlock] {
-        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var blocks: [OwnerMarkdownBlock] = []
-        var paragraph: [String] = []
-        var codeLines: [String] = []
-        var isInsideCodeBlock = false
-
-        func flushParagraph() {
-            guard !paragraph.isEmpty else { return }
-            blocks.append(.paragraph(paragraph.joined(separator: "\n")))
-            paragraph.removeAll(keepingCapacity: true)
-        }
-
-        func flushCode() {
-            blocks.append(.code(codeLines.joined(separator: "\n")))
-            codeLines.removeAll(keepingCapacity: true)
-        }
-
-        for rawLine in lines {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-
-            if line.hasPrefix("```") {
-                if isInsideCodeBlock {
-                    flushCode()
-                    isInsideCodeBlock = false
-                } else {
-                    flushParagraph()
-                    isInsideCodeBlock = true
-                }
-                continue
-            }
-
-            if isInsideCodeBlock {
-                codeLines.append(rawLine)
-                continue
-            }
-
-            guard !line.isEmpty else {
-                flushParagraph()
-                continue
-            }
-
-            if let heading = heading(from: line) {
-                flushParagraph()
-                blocks.append(.heading(heading.level, heading.text))
-            } else if let bullet = bullet(from: line) {
-                flushParagraph()
-                blocks.append(.bullet(bullet))
-            } else if let numbered = numbered(from: line) {
-                flushParagraph()
-                blocks.append(.numbered(numbered.number, numbered.text))
-            } else {
-                paragraph.append(rawLine)
-            }
-        }
-
-        if isInsideCodeBlock {
-            flushCode()
-        }
-        flushParagraph()
-        return blocks.isEmpty ? [.paragraph(source)] : blocks
-    }
-
-    private static func heading(from line: String) -> (level: Int, text: String)? {
-        let level = line.prefix { $0 == "#" }.count
-        guard (1...3).contains(level) else { return nil }
-        let text = line.dropFirst(level)
-        guard text.first?.isWhitespace == true else { return nil }
-        return (level, String(text).trimmingCharacters(in: .whitespaces))
-    }
-
-    private static func bullet(from line: String) -> String? {
-        for marker in ["- ", "* ", "• "] where line.hasPrefix(marker) {
-            return String(line.dropFirst(marker.count))
-        }
-        return nil
-    }
-
-    private static func numbered(from line: String) -> (number: String, text: String)? {
-        guard let separator = line.firstIndex(where: { $0 == "." || $0 == ")" }) else { return nil }
-        let number = String(line[..<separator])
-        guard !number.isEmpty, number.allSatisfy(\.isNumber) else { return nil }
-        let remainder = line[line.index(after: separator)...]
-        guard remainder.first?.isWhitespace == true else { return nil }
-        return (number, String(remainder).trimmingCharacters(in: .whitespaces))
+        WorkstateMarkdownView(source: source, style: .message)
     }
 }
 

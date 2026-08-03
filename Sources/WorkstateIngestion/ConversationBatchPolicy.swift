@@ -33,7 +33,7 @@ public struct ConversationBatchPolicy: Equatable, Sendable {
     public var maximumEstimatedSourceBytes: UInt64
 
     public init(
-        quietInterval: TimeInterval = 20 * 60,
+        quietInterval: TimeInterval = 30 * 60,
         maximumEstimatedSourceBytes: UInt64 = 256 * 1024
     ) {
         precondition(quietInterval > 0, "Batch quiet interval must be positive")
@@ -50,9 +50,6 @@ public struct ConversationBatchPolicy: Equatable, Sendable {
         now: Date = Date()
     ) -> ConversationBatchTrigger? {
         guard activity.pointerCount > 0 else { return nil }
-        if activity.estimatedSourceBytes >= maximumEstimatedSourceBytes {
-            return .safetySize
-        }
         guard let latestCompletedAt = activity.latestCompletedAt,
               now.timeIntervalSince(latestCompletedAt) >= quietInterval else {
             return nil

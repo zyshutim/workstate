@@ -16,6 +16,8 @@ struct WorkstateChecks {
         try collaborationInferenceCannotRewriteActiveProfile()
         try modelCatalogFiltersUnsupportedOptions()
         try agentRuntimeStreamsRequestThroughStdin()
+        try ProjectOwnerSessionChecks.run()
+        try cognitionDraftUsesStoredProjectSources()
         try legacyStateMigration()
         try schemaV3Migration()
         try projectPositionUpdate()
@@ -29,7 +31,11 @@ struct WorkstateChecks {
         try taskBranchAndMerge()
         try worklineReconciliationRepairsSemanticOwnership()
         try contextRevisionAuthority()
-        try ingestionBatchIsAtomicAndUpdatesProjectHead()
+        try projectCognitionLifecycle()
+        try ProjectCognitionChecks.run()
+        try ProjectTimelineTurningPointChecks.run()
+        try ContextHandoffContractChecks.run()
+        try ingestionBatchIsAtomicAndQueuesCognitionRevision()
         try ingestionBatchBranchesNewProjectFromHistoricalStart()
         try ingestionFocusSwitchDoesNotCompletePreviousWorkline()
         try projectTimelineHierarchy()
@@ -57,6 +63,7 @@ struct WorkstateChecks {
         try largeConversationResolvesByMessageSpans()
         try durableMemoryPersistsSelectiveDocuments()
         try monitoringCutoffDropsDisabledPeriod()
+        try appHostedRuntimeStopCancelsScheduledCallbacks()
         try interruptedProcessingRecoversWithoutRepeatingCompletedStages()
         try interruptedBatchFailsWithoutModelRetry()
         try semanticBundlesPersistRoutedEvidence()
@@ -92,19 +99,28 @@ struct WorkstateChecks {
         try require(!initial.liveMonitoringEnabled, "existing workspace does not start monitoring implicitly")
         try require(initial.liveMonitoringStartedAt == nil, "disabled monitoring has no start time")
         try require(initial.profile(for: .route).modelID == "gpt-5.6-luna", "router default model")
+        try require(initial.quietIntervalMinutes == 30, "conversation quiet defaults to thirty minutes")
 
         var updated = initial
         updated.liveMonitoringEnabled = false
+        updated.quietIntervalMinutes = 10
         updated.agentProfiles[.brief] = AgentProfile(modelID: "gpt-5.5", effort: .high)
         try repository.save(updated)
         let loaded = try repository.load()
         try require(!loaded.liveMonitoringEnabled, "monitoring setting persists")
+        try require(loaded.quietIntervalMinutes == 10, "conversation quiet interval persists")
         try require(loaded.profile(for: .brief).effort == .high, "agent effort persists")
 
         var legacy = initial
         legacy.liveMonitoringEnabled = true
         legacy.liveMonitoringStartedAt = nil
         try repository.save(legacy)
+        var legacyObject = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: repository.url)
+        ) as! [String: Any]
+        legacyObject.removeValue(forKey: "quietIntervalMinutes")
+        try JSONSerialization.data(withJSONObject: legacyObject)
+            .write(to: repository.url, options: .atomic)
         let fileDate = Date(timeIntervalSince1970: 1_784_619_029)
         try FileManager.default.setAttributes(
             [.modificationDate: fileDate],
@@ -115,6 +131,7 @@ struct WorkstateChecks {
             migrated.liveMonitoringStartedAt == fileDate,
             "legacy monitoring start migrates from the last explicit settings save"
         )
+        try require(migrated.quietIntervalMinutes == 30, "legacy settings receive the new default quiet interval")
     }
 
     private static func modelCatalogFiltersUnsupportedOptions() throws {
@@ -148,6 +165,22 @@ struct WorkstateChecks {
               "supported_reasoning_levels": [{"effort": "medium"}]
             },
             {
+              "slug": "missing-default",
+              "display_name": "Missing Default",
+              "visibility": "list",
+              "supported_in_api": true,
+              "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "high"}
+              ]
+            },
+            {
+              "slug": "missing-default-and-efforts",
+              "display_name": "Missing Default And Efforts",
+              "visibility": "list",
+              "supported_in_api": true
+            },
+            {
               "slug": "unsupported",
               "display_name": "Unsupported",
               "visibility": "list",
@@ -160,10 +193,17 @@ struct WorkstateChecks {
         """
         try Data(data.utf8).write(to: url)
         let models = try CodexModelCatalog(url: url).load()
-        try require(models.map(\.id) == ["usable"], "catalog only exposes listed API models")
+        try require(
+            models.map(\.id) == ["usable", "missing-default"],
+            "catalog tolerates missing optional model defaults and skips models without efforts"
+        )
         try require(
             models[0].supportedEfforts == [.low, .medium],
             "catalog excludes max, ultra, and unsupported effort options"
+        )
+        try require(
+            models[1].defaultEffort == .low,
+            "catalog uses the first supported effort when the default is absent"
         )
     }
 
@@ -245,6 +285,122 @@ struct WorkstateChecks {
         try require(
             !leftovers.contains(where: { $0.hasPrefix("agent-request-") }),
             "Agent request is never copied to a temporary JSON file"
+        )
+    }
+
+    private static func cognitionDraftUsesStoredProjectSources() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-cognition-draft-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = SourceReference(
+            id: "stored-source",
+            kind: "conversation",
+            label: "Stored conversation",
+            locator: "/tmp/stored.jsonl",
+            threadID: "stored-thread",
+            turnIDs: ["stored-turn"],
+            excerpt: [
+                ConversationMessage(
+                    role: "user",
+                    text: "The project exists to preserve durable context.",
+                    timestamp: Date(timeIntervalSince1970: 100)
+                ),
+                ConversationMessage(
+                    role: "assistant",
+                    text: "The current model is evidence-backed project cognition.",
+                    timestamp: Date(timeIntervalSince1970: 101)
+                )
+            ]
+        )
+        let project = ProjectRecord(
+            id: "stored-project",
+            name: "Stored project",
+            summary: "Stored identity",
+            context: ProjectContext(purpose: "Test stored evidence"),
+            sourceIDs: [source.id]
+        )
+        let repository = WorkstateRepository(paths: WorkstatePaths(root: root))
+        try repository.ensureInitialized(
+            initial: WorkspaceSnapshot(projects: [project], sources: [source])
+        )
+        let runtimeScript = root.appendingPathComponent("fake-cognition-runtime.js")
+        let runtimeSource = #"""
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", chunk => { input += chunk; });
+        process.stdin.on("end", () => {
+          const request = JSON.parse(input);
+          if (request.mode !== "cognition_draft" || request.segments.length !== 1) process.exit(7);
+          const evidenceID = request.segments[0].id;
+          process.stdout.write(JSON.stringify({
+            mode: request.mode,
+            runtimeThreadId: "ephemeral-cognition-draft-check",
+            usage: null,
+            result: {
+              isReady: true,
+              missingContext: [],
+              sections: [{
+                id: "project-picture",
+                title: "Project picture",
+                body: "Evidence-backed project cognition",
+                purpose: "Maintain the durable project picture",
+                inclusionRules: ["Durable project-level facts"],
+                exclusionRules: ["Ordinary progress"],
+                updateTriggers: ["Material project change"],
+                coverage: ["projectPurpose", "currentUnderstanding", "decisionPrinciples", "currentState"],
+                order: 0,
+                sourceIDs: [evidenceID]
+              }]
+            }
+          }));
+        });
+        """#
+        try Data(runtimeSource.utf8).write(to: runtimeScript, options: .atomic)
+        let scanner = CodexSessionScanner(
+            sessionsRoot: root.appendingPathComponent("empty-sessions", isDirectory: true),
+            runtimeRoot: root,
+            retainsLegacyPendingState: false
+        )
+        let generation = try AgentRuntimeClient(
+            runtimeScript: runtimeScript,
+            nodePath: AgentRuntimeClient.defaultNodePath(),
+            runtimeRoot: root
+        ).generateProjectCognitionDraft(
+            project: project,
+            workspace: try repository.load(),
+            scanner: scanner
+        )
+        try require(generation.isReady, "stored project evidence can create a cognition draft")
+        try require(
+            generation.sections.first?.sourceIDs == [source.id],
+            "cognition draft maps model evidence back to the stored source pointer"
+        )
+        let attemptURL = root
+            .appendingPathComponent("cognition-attempts", isDirectory: true)
+            .appendingPathComponent("stored-project-latest.json")
+        let attempt = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: attemptURL)
+        ) as? [String: Any]
+        try require(
+            attempt?["status"] as? String == "validated",
+            "cognition draft preserves the validated raw model result"
+        )
+        _ = try WorkstateService(repository: repository).saveProjectCognitionDraft(
+            projectID: project.id,
+            sections: generation.sections
+        )
+        try AgentRuntimeClient(
+            runtimeScript: runtimeScript,
+            nodePath: AgentRuntimeClient.defaultNodePath(),
+            runtimeRoot: root
+        ).recordProjectCognitionDraftSaved(projectID: project.id)
+        let savedAttempt = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: attemptURL)
+        ) as? [String: Any]
+        try require(
+            savedAttempt?["status"] as? String == "saved",
+            "cognition draft records the final persisted outcome"
         )
     }
 
@@ -1486,8 +1642,8 @@ struct WorkstateChecks {
         var oversized = active
         oversized.estimatedSourceBytes = 256 * 1024
         try require(
-            policy.automaticTrigger(for: oversized, now: now) == .safetySize,
-            "bounded source size can close a batch before quiet"
+            policy.automaticTrigger(for: oversized, now: now) == nil,
+            "bounded source size never bypasses per-conversation quiet"
         )
     }
 
@@ -2410,6 +2566,45 @@ struct WorkstateChecks {
         )
     }
 
+    private static func appHostedRuntimeStopCancelsScheduledCallbacks() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workstate-runtime-stop-check-\(UUID().uuidString)", isDirectory: true)
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+
+        let runtime = AppHostedConversationRuntime(
+            runtimeRoot: root,
+            sessionsRoot: sessions
+        )
+        try runtime.start()
+        runtime.stop()
+
+        let statusRepository = RuntimeStatusRepository(root: root)
+        let stopped = try statusRepository.load()
+        let stoppedModificationDate = try FileManager.default.attributesOfItem(
+            atPath: statusRepository.url.path
+        )[.modificationDate] as? Date
+        Thread.sleep(forTimeInterval: 3.2)
+
+        let afterPollWindow = try statusRepository.load()
+        let afterModificationDate = try FileManager.default.attributesOfItem(
+            atPath: statusRepository.url.path
+        )[.modificationDate] as? Date
+        try require(stopped.activity == .stopped, "runtime stop publishes the stopped state")
+        try require(afterPollWindow.activity == .stopped, "stale callbacks cannot restart a stopped runtime")
+        try require(
+            stoppedModificationDate == afterModificationDate,
+            "stopped runtime does not rewrite status after the source-poll interval"
+        )
+        try require(
+            !FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("agent-runs.jsonl").path
+            ),
+            "stopping an idle runtime never starts an Agent"
+        )
+    }
+
     private static func interruptedBatchFailsWithoutModelRetry() throws {
         try withFixture { repository in
             try repository.ensureInitialized(initial: WorkspaceSnapshot())
@@ -2924,6 +3119,31 @@ struct WorkstateChecks {
                     position: GraphPosition(x: 80, y: 120)
                 )
             )
+            let cognitionSource = SourceReference(
+                id: "pre-rebuild-cognition-source",
+                kind: "conversation",
+                label: "Confirmed cognition",
+                locator: "/tmp/pre-rebuild-cognition.jsonl"
+            )
+            _ = try repository.update(
+                mutation: WorkspaceMutation(kind: "check.seed", summary: "Seed cognition source")
+            ) { snapshot in
+                snapshot.sources.append(cognitionSource)
+            }
+            let cognitionSection = ProjectCognitionSection(
+                id: "pre-rebuild-picture",
+                title: "Project picture",
+                body: "Confirmed before historical rebuild",
+                purpose: "Preserve canonical project cognition",
+                coverage: ProjectCognitionCoverage.allCases,
+                sourceIDs: [cognitionSource.id],
+                order: 0
+            )
+            _ = try service.saveProjectCognitionDraft(
+                projectID: "project",
+                sections: [cognitionSection]
+            )
+            _ = try service.confirmProjectCognitionDraft(projectID: "project")
             let evidence = rebuildEvidence()
             _ = try ProjectRebuildApplier(repository: repository).apply(
                 rebuildProposal(evidenceID: evidence.id),
@@ -2935,6 +3155,10 @@ struct WorkstateChecks {
             }
             try require(project.summary == "Verified project HEAD", "rebuild replaces project HEAD")
             try require(project.context.objectModel == ["Project", "Workline", "Delta"], "rebuild replaces object model")
+            try require(
+                project.context.cognition?.sections == [cognitionSection],
+                "rebuild preserves user-confirmed cognition"
+            )
             try require(project.tasks.map(\.id) == ["project-core-workline"], "rebuild creates semantic workline")
             try require(project.events.contains(where: { $0.id == "project-core-delta" }), "rebuild creates delta")
             try require(project.events.contains(where: { $0.id == "rebuild-merge-project-core-workline" }), "completed workline merges")
@@ -3216,6 +3440,24 @@ struct WorkstateChecks {
                 name: "Project",
                 summary: "Fallback",
                 context: ProjectContext(
+                    cognition: ProjectCognitionDocument(
+                        state: .confirmed,
+                        version: 1,
+                        sections: [
+                            ProjectCognitionSection(
+                                id: "project-picture",
+                                title: "Project picture",
+                                body: "Canonical product picture",
+                                purpose: "Keep the current project model",
+                                coverage: ProjectCognitionCoverage.allCases,
+                                sourceIDs: [source.id],
+                                order: 0
+                            )
+                        ],
+                        generatedAt: Date(timeIntervalSince1970: 150),
+                        confirmedAt: Date(timeIntervalSince1970: 160),
+                        updatedAt: Date(timeIntervalSince1970: 160)
+                    ),
                     currentSummary: "Current project HEAD",
                     purpose: "Preserve context",
                     understanding: [
@@ -3257,12 +3499,13 @@ struct WorkstateChecks {
                 projectID: project.id,
                 generatedAt: Date(timeIntervalSince1970: 300)
             )
-            try require(snapshot.project.summary == "Current project HEAD", "handoff uses project HEAD")
+            try require(snapshot.project.summary == "Fallback", "handoff keeps compact project identity")
             try require(snapshot.worklines.map(\.id) == [activeTask.id], "handoff excludes completed work")
             try require(snapshot.worklines[0].deltas.map(\.id) == ["active-latest"], "handoff keeps meaningful delta")
             try require(snapshot.sources.map(\.id) == [source.id], "handoff keeps source pointer")
             let markdown = ContextSnapshotMarkdownRenderer().render(snapshot)
-            try require(markdown.contains("Confirmed decision"), "handoff renders decisions")
+            try require(markdown.contains("Canonical product picture"), "handoff renders confirmed cognition")
+            try require(!markdown.contains("Confirmed decision"), "handoff does not mix legacy context into cognition")
             try require(!markdown.contains("Old work"), "handoff omits completed work")
             let handoff = try ContextHandoffExporter(root: repository.paths.root).export(snapshot)
             try require(
@@ -3323,11 +3566,166 @@ struct WorkstateChecks {
         }
     }
 
-    private static func ingestionBatchIsAtomicAndUpdatesProjectHead() throws {
+    private static func projectCognitionLifecycle() throws {
+        try withFixture { repository in
+            let sourceA = SourceReference(
+                id: "cognition-source-a",
+                kind: "conversation",
+                label: "A",
+                locator: "/tmp/a.jsonl"
+            )
+            let sourceB = SourceReference(
+                id: "cognition-source-b",
+                kind: "conversation",
+                label: "B",
+                locator: "/tmp/b.jsonl"
+            )
+            let sourceC = SourceReference(
+                id: "cognition-source-c",
+                kind: "conversation",
+                label: "C",
+                locator: "/tmp/c.jsonl"
+            )
+            let project = ProjectRecord(
+                id: "cognition-project",
+                name: "Cognition project",
+                summary: "Identity",
+                events: [
+                    ProjectEvent(
+                        id: "cognition-project-start",
+                        title: "Started",
+                        summary: "Started",
+                        kind: .projectStarted,
+                        loopStage: .intake
+                    )
+                ]
+            )
+            try repository.ensureInitialized(
+                initial: WorkspaceSnapshot(
+                    projects: [project],
+                    sources: [sourceA, sourceB, sourceC]
+                )
+            )
+            let service = WorkstateService(repository: repository)
+            let first = ProjectCognitionSection(
+                id: "purpose-model",
+                title: "Purpose and model",
+                body: "Initial purpose and model",
+                purpose: "Explain why and how",
+                coverage: [.projectPurpose, .currentUnderstanding],
+                sourceIDs: [sourceA.id],
+                order: 0
+            )
+            let second = ProjectCognitionSection(
+                id: "principles-state",
+                title: "Principles and state",
+                body: "Initial principles and state",
+                purpose: "Guide decisions and locate current work",
+                coverage: [.decisionPrinciples, .currentState],
+                sourceIDs: [sourceA.id],
+                order: 1
+            )
+            _ = try service.saveProjectCognitionDraft(
+                projectID: project.id,
+                sections: [first, second]
+            )
+            _ = try service.confirmProjectCognitionDraft(projectID: project.id)
+
+            let firstRevision = ProjectCognitionRevision(
+                id: "purpose-revision-v1",
+                operation: .update,
+                beforeSections: [first],
+                afterSections: [
+                    ProjectCognitionSection(
+                        id: first.id,
+                        title: first.title,
+                        body: "Updated purpose and model",
+                        purpose: first.purpose,
+                        coverage: first.coverage,
+                        sourceIDs: [sourceA.id, sourceB.id],
+                        order: first.order
+                    )
+                ],
+                baseVersion: 1,
+                rationale: "Purpose changed",
+                sourceIDs: [sourceB.id]
+            )
+            let secondRevision = ProjectCognitionRevision(
+                id: "state-revision-v1",
+                operation: .update,
+                beforeSections: [second],
+                afterSections: [
+                    ProjectCognitionSection(
+                        id: second.id,
+                        title: second.title,
+                        body: "Updated principles and state",
+                        purpose: second.purpose,
+                        coverage: second.coverage,
+                        sourceIDs: [sourceA.id, sourceC.id],
+                        order: second.order
+                    )
+                ],
+                baseVersion: 1,
+                rationale: "State changed",
+                sourceIDs: [sourceC.id]
+            )
+            _ = try service.upsertProjectCognitionRevision(
+                projectID: project.id,
+                revision: firstRevision
+            )
+            _ = try service.upsertProjectCognitionRevision(
+                projectID: project.id,
+                revision: secondRevision
+            )
+            _ = try service.resolveProjectCognitionRevision(
+                projectID: project.id,
+                revisionID: firstRevision.id,
+                resolution: .accepted
+            )
+            var cognition = try service.snapshot().project(id: project.id)?.context.cognition
+            try require(cognition?.version == 2, "accepting cognition increments the version")
+            try require(
+                cognition?.sections.first?.body == "Updated purpose and model",
+                "accepted cognition becomes canonical"
+            )
+            try require(
+                cognition?.revisions.first(where: { $0.id == secondRevision.id })?.baseVersion == 2,
+                "independent pending cognition rebases after another section is accepted"
+            )
+            _ = try service.resolveProjectCognitionRevision(
+                projectID: project.id,
+                revisionID: secondRevision.id,
+                resolution: .rejected
+            )
+            cognition = try service.snapshot().project(id: project.id)?.context.cognition
+            try require(cognition?.version == 2, "rejecting cognition does not increment the version")
+            try require(
+                cognition?.sections.last?.body == "Initial principles and state",
+                "rejected cognition never changes canonical text"
+            )
+        }
+    }
+
+    private static func ingestionBatchIsAtomicAndQueuesCognitionRevision() throws {
         try withFixture { repository in
             let start = Date(timeIntervalSince1970: 100)
             let firstDate = Date(timeIntervalSince1970: 200)
             let secondDate = firstDate
+            let baselineSource = SourceReference(
+                id: "source-baseline",
+                kind: "conversation",
+                label: "Baseline",
+                locator: "/tmp/baseline.jsonl"
+            )
+            let baselineSection = ProjectCognitionSection(
+                id: "project-picture",
+                title: "Project picture",
+                body: "Old canonical cognition",
+                purpose: "Maintain the project picture",
+                coverage: ProjectCognitionCoverage.allCases,
+                sourceIDs: [baselineSource.id],
+                order: 0
+            )
             let project = ProjectRecord(
                 id: "project",
                 name: "Project",
@@ -3336,6 +3734,14 @@ struct WorkstateChecks {
                 updatedAt: start,
                 lastActivityAt: start,
                 context: ProjectContext(
+                    cognition: ProjectCognitionDocument(
+                        state: .confirmed,
+                        version: 1,
+                        sections: [baselineSection],
+                        generatedAt: start,
+                        confirmedAt: start,
+                        updatedAt: start
+                    ),
                     currentSummary: "Old HEAD",
                     purpose: "Keep project memory current"
                 ),
@@ -3351,7 +3757,11 @@ struct WorkstateChecks {
                 ]
             )
             try repository.ensureInitialized(
-                initial: WorkspaceSnapshot(updatedAt: start, projects: [project])
+                initial: WorkspaceSnapshot(
+                    updatedAt: start,
+                    projects: [project],
+                    sources: [baselineSource]
+                )
             )
             let mutationLinesBefore = try Data(contentsOf: repository.paths.events)
                 .split(separator: 0x0A)
@@ -3413,6 +3823,27 @@ struct WorkstateChecks {
                             rationale: "Explicitly confirmed"
                         )
                     ]
+                ),
+                cognitionRevision: ProjectCognitionRevision(
+                    id: "cognition-revision-project-v1-picture",
+                    operation: .update,
+                    beforeSections: [baselineSection],
+                    afterSections: [
+                        ProjectCognitionSection(
+                            id: baselineSection.id,
+                            title: baselineSection.title,
+                            body: "Proposed canonical cognition",
+                            purpose: baselineSection.purpose,
+                            coverage: baselineSection.coverage,
+                            sourceIDs: [baselineSource.id, firstSource.id],
+                            order: baselineSection.order
+                        )
+                    ],
+                    baseVersion: 1,
+                    rationale: "The project picture materially changed",
+                    sourceIDs: [firstSource.id],
+                    status: .pending,
+                    createdAt: firstDate
                 )
             )
             let second = IngestionProjectChange(
@@ -3447,10 +3878,17 @@ struct WorkstateChecks {
                 changes: [first, second]
             )
             let updated = try repository.load().project(id: project.id)
-            try require(updated?.context.currentSummary == "Current project HEAD", "ingestion updates Project HEAD")
-            try require(updated?.context.revisions.map(\.id) == ["context-revision-first"], "ingestion records one context revision")
-            try require(updated?.context.understanding.first?.id == "project-current-model", "ingestion persists structured understanding")
-            try require(updated?.context.acceptedDecisions.first?.id == "project-use-confirmed-model", "ingestion persists confirmed decisions")
+            try require(updated?.context.currentSummary == "Old HEAD", "ingestion leaves legacy ProjectContext unchanged")
+            try require(updated?.context.revisions.isEmpty == true, "ingestion does not write legacy context revisions")
+            try require(
+                updated?.context.cognition?.sections.first?.body == "Old canonical cognition",
+                "pending cognition never becomes canonical automatically"
+            )
+            try require(
+                updated?.context.cognition?.revisions.first?.afterSections.first?.body
+                    == "Proposed canonical cognition",
+                "ingestion queues one tracked cognition proposal"
+            )
             try require(updated?.task(id: "project-core-workline")?.status == .completed, "batch changes evolve one workline in order")
             try require(
                 updated?.event(id: "z-delta-first") != nil

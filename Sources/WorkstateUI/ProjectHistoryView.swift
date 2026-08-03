@@ -20,21 +20,11 @@ struct ProjectWorkspaceView: View {
             VStack(spacing: 0) {
                 switch displayedPage {
                 case .progress:
-                    ProjectContextSection(
-                        project: project,
-                        isExpanded: model.isContextExpanded,
-                        onToggle: model.toggleContext
-                    )
-
-                    ProjectTimelineSection(
+                    ProjectProgressSplitView(
                         workspace: model.workspace,
                         project: project,
                         liveActivity: model.liveActivity(for: project.id),
-                        isContextExpanded: model.isContextExpanded,
-                        selectedEventID: model.selectedEventID,
-                        onSelectEvent: model.selectEvent,
-                        onSelectTaskEvent: model.selectTaskEvent,
-                        onDismissEvent: model.closeEvent
+                        model: model
                     )
                 case .topics:
                     ProjectTopicsPage(
@@ -234,6 +224,62 @@ struct ProjectWorkspaceView: View {
 
     private var workspaceBackground: Color {
         WorkstateTheme.workspaceBackground
+    }
+}
+
+private struct ProjectProgressSplitView: View {
+    let workspace: WorkspaceSnapshot
+    let project: ProjectRecord
+    let liveActivity: LiveProjectActivity?
+    @ObservedObject var model: WorkstateViewModel
+    @Environment(\.workstateSnapshotRendering) private var snapshotRendering
+
+    var body: some View {
+        GeometryReader { proxy in
+            if snapshotRendering {
+                VStack(spacing: 0) {
+                    cognition
+                        .frame(height: max(250, proxy.size.height / 2))
+                    Rectangle()
+                        .fill(WorkstateTheme.separator.opacity(0.78))
+                        .frame(height: 1)
+                    timeline
+                        .frame(maxHeight: .infinity)
+                }
+            } else {
+                VSplitView {
+                    cognition
+                        .frame(
+                            minHeight: 250,
+                            idealHeight: proxy.size.height / 2,
+                            maxHeight: .infinity
+                        )
+                    timeline
+                        .frame(
+                            minHeight: 220,
+                            idealHeight: proxy.size.height / 2,
+                            maxHeight: .infinity
+                        )
+                }
+            }
+        }
+    }
+
+    private var cognition: some View {
+        ProjectCognitionView(project: project, model: model)
+    }
+
+    private var timeline: some View {
+        ProjectTimelineSection(
+            workspace: workspace,
+            project: project,
+            liveActivity: liveActivity,
+            isContextExpanded: model.isContextExpanded,
+            selectedEventID: model.selectedEventID,
+            onSelectEvent: model.selectEvent,
+            onSelectTaskEvent: model.selectTaskEvent,
+            onDismissEvent: model.closeEvent
+        )
     }
 }
 
@@ -524,10 +570,6 @@ private struct ProjectTimelineSection: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Rectangle()
-                .fill(WorkstateTheme.separator.opacity(0.72))
-                .frame(height: 0.5)
-
             HStack {
                 if displayedMode == .branches {
                     if snapshotRendering {

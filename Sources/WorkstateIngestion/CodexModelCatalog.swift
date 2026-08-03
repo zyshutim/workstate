@@ -36,14 +36,22 @@ public struct CodexModelCatalog: Sendable {
                 "Codex model catalog not found. Open Codex once, then reopen Workstate."
             )
         }
-        let cache = try JSONDecoder().decode(ModelCache.self, from: Data(contentsOf: url))
+        let cache: ModelCache
+        do {
+            cache = try JSONDecoder().decode(ModelCache.self, from: Data(contentsOf: url))
+        } catch is DecodingError {
+            throw WorkstateStorageError.invalidState(
+                "Codex 模型列表格式发生变化，当前版本的 Workstate 暂时无法读取。"
+            )
+        }
         let models = cache.models.compactMap { model -> CodexModelRecord? in
             guard model.visibility == "list", model.supportedInAPI else { return nil }
             let efforts = AgentReasoningEffort.allCases.filter { effort in
                 model.supportedReasoningLevels.contains { $0.effort == effort.rawValue }
             }
             guard !efforts.isEmpty else { return nil }
-            let defaultEffort = AgentReasoningEffort(rawValue: model.defaultReasoningLevel)
+            let defaultEffort = model.defaultReasoningLevel
+                .flatMap(AgentReasoningEffort.init(rawValue:))
                 .flatMap { efforts.contains($0) ? $0 : nil }
                 ?? efforts[0]
             return CodexModelRecord(
@@ -69,7 +77,7 @@ private struct CachedModel: Decodable {
     var displayName: String
     var visibility: String
     var supportedInAPI: Bool
-    var defaultReasoningLevel: String
+    var defaultReasoningLevel: String?
     var supportedReasoningLevels: [CachedReasoningLevel]
 
     enum CodingKeys: String, CodingKey {
@@ -79,6 +87,22 @@ private struct CachedModel: Decodable {
         case supportedInAPI = "supported_in_api"
         case defaultReasoningLevel = "default_reasoning_level"
         case supportedReasoningLevels = "supported_reasoning_levels"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        slug = try container.decode(String.self, forKey: .slug)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        visibility = try container.decode(String.self, forKey: .visibility)
+        supportedInAPI = try container.decode(Bool.self, forKey: .supportedInAPI)
+        defaultReasoningLevel = try container.decodeIfPresent(
+            String.self,
+            forKey: .defaultReasoningLevel
+        )
+        supportedReasoningLevels = try container.decodeIfPresent(
+            [CachedReasoningLevel].self,
+            forKey: .supportedReasoningLevels
+        ) ?? []
     }
 }
 

@@ -49,7 +49,7 @@ public struct PendingThreadConversationActivity: Equatable, Sendable {
 public struct ConversationBatchCoordinator: Sendable {
     public let scanner: CodexSessionScanner
     public let orchestrator: WorkstateOrchestrator
-    public let policy: ConversationBatchPolicy
+    public var policy: ConversationBatchPolicy
     public let maximumPointersPerBatch: Int
 
     public init(
@@ -134,9 +134,7 @@ public struct ConversationBatchCoordinator: Sendable {
         guard !activities.isEmpty else { return nil }
         return activities.map { item in
             let policyDelay: TimeInterval
-            if item.activity.estimatedSourceBytes >= policy.maximumEstimatedSourceBytes {
-                policyDelay = 0
-            } else if let latest = item.activity.latestCompletedAt {
+            if let latest = item.activity.latestCompletedAt {
                 policyDelay = max(0, policy.quietInterval - now.timeIntervalSince(latest))
             } else {
                 policyDelay = policy.quietInterval

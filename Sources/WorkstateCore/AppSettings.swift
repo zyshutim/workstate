@@ -65,10 +65,14 @@ public struct AgentProfile: Codable, Equatable, Sendable {
 }
 
 public struct WorkstateSettings: Codable, Equatable, Sendable {
+    public static let quietIntervalOptionsMinutes = [10, 15, 30, 45, 60, 90, 120, 240]
+    public static let defaultQuietIntervalMinutes = 30
+
     public var schemaVersion: Int
     public var setupCompleted: Bool
     public var liveMonitoringEnabled: Bool
     public var liveMonitoringStartedAt: Date?
+    public var quietIntervalMinutes: Int
     public var agentProfiles: [AgentRole: AgentProfile]
 
     public init(
@@ -76,13 +80,35 @@ public struct WorkstateSettings: Codable, Equatable, Sendable {
         setupCompleted: Bool = false,
         liveMonitoringEnabled: Bool = false,
         liveMonitoringStartedAt: Date? = nil,
+        quietIntervalMinutes: Int = WorkstateSettings.defaultQuietIntervalMinutes,
         agentProfiles: [AgentRole: AgentProfile] = WorkstateSettings.defaultProfiles
     ) {
         self.schemaVersion = schemaVersion
         self.setupCompleted = setupCompleted
         self.liveMonitoringEnabled = liveMonitoringEnabled
         self.liveMonitoringStartedAt = liveMonitoringStartedAt
+        self.quietIntervalMinutes = quietIntervalMinutes
         self.agentProfiles = agentProfiles
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case setupCompleted
+        case liveMonitoringEnabled
+        case liveMonitoringStartedAt
+        case quietIntervalMinutes
+        case agentProfiles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        setupCompleted = try container.decode(Bool.self, forKey: .setupCompleted)
+        liveMonitoringEnabled = try container.decode(Bool.self, forKey: .liveMonitoringEnabled)
+        liveMonitoringStartedAt = try container.decodeIfPresent(Date.self, forKey: .liveMonitoringStartedAt)
+        quietIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .quietIntervalMinutes)
+            ?? Self.defaultQuietIntervalMinutes
+        agentProfiles = try container.decode([AgentRole: AgentProfile].self, forKey: .agentProfiles)
     }
 
     public static let defaultProfiles: [AgentRole: AgentProfile] = [
@@ -126,6 +152,11 @@ public struct WorkstateSettingsRepository: Sendable {
                 "Unsupported Workstate settings schema \(settings.schemaVersion)"
             )
         }
+        guard WorkstateSettings.quietIntervalOptionsMinutes.contains(settings.quietIntervalMinutes) else {
+            throw WorkstateStorageError.invalidState(
+                "Unsupported conversation quiet interval: \(settings.quietIntervalMinutes) minutes"
+            )
+        }
         var requiresSave = false
         for role in AgentRole.allCases where settings.agentProfiles[role] == nil {
             settings.agentProfiles[role] = WorkstateSettings.defaultProfiles[role]
@@ -147,6 +178,11 @@ public struct WorkstateSettingsRepository: Sendable {
     public func save(_ settings: WorkstateSettings) throws {
         guard settings.schemaVersion == 1 else {
             throw WorkstateStorageError.invalidState("Expected Workstate settings schema 1")
+        }
+        guard WorkstateSettings.quietIntervalOptionsMinutes.contains(settings.quietIntervalMinutes) else {
+            throw WorkstateStorageError.invalidState(
+                "Unsupported conversation quiet interval: \(settings.quietIntervalMinutes) minutes"
+            )
         }
         let missingRoles = Set(AgentRole.allCases).subtracting(settings.agentProfiles.keys)
         guard missingRoles.isEmpty else {

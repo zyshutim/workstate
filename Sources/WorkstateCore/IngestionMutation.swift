@@ -162,6 +162,8 @@ public struct IngestionProjectChange: Codable, Sendable {
     public var carryoverQuestions: [String]
     public var taskStartEventID: String
     public var contextPatch: IngestionContextPatch?
+    public var cognitionRevision: ProjectCognitionRevision?
+    public var turningPoint: ProjectTimelineTurningPoint?
     public var topicUpserts: [IngestionTopicMutation]
 
     public init(
@@ -189,6 +191,8 @@ public struct IngestionProjectChange: Codable, Sendable {
         carryoverQuestions: [String],
         taskStartEventID: String,
         contextPatch: IngestionContextPatch?,
+        cognitionRevision: ProjectCognitionRevision? = nil,
+        turningPoint: ProjectTimelineTurningPoint? = nil,
         topicUpserts: [IngestionTopicMutation] = []
     ) {
         self.id = id
@@ -215,6 +219,8 @@ public struct IngestionProjectChange: Codable, Sendable {
         self.carryoverQuestions = carryoverQuestions
         self.taskStartEventID = taskStartEventID
         self.contextPatch = contextPatch
+        self.cognitionRevision = cognitionRevision
+        self.turningPoint = turningPoint
         self.topicUpserts = topicUpserts
     }
 }
@@ -348,6 +354,21 @@ public extension WorkstateService {
         }
         let sourceIDs = Array(Set(change.sources.map(\.id))).sorted()
         var project = snapshot.projects[projectIndex]
+        if let revision = change.cognitionRevision {
+            guard var cognition = project.context.cognition else {
+                throw WorkstateStorageError.invalidState(
+                    "Cognition proposals require a confirmed document"
+                )
+            }
+            try ProjectCognitionMutation.upsertPendingRevision(
+                revision,
+                projectID: change.projectID,
+                knownSourceIDs: Set(snapshot.sources.map(\.id)),
+                timestamp: change.timestamp,
+                cognition: &cognition
+            )
+            project.context.cognition = cognition
+        }
         let taskID = try resolveWorkline(
             for: change,
             sourceIDs: sourceIDs,
@@ -362,12 +383,9 @@ public extension WorkstateService {
             project.focusedTaskID = taskID
         }
 
-        let decisions = try applyContextPatch(
-            change.contextPatch,
-            timestamp: change.timestamp,
-            sourceIDs: sourceIDs,
-            project: &project
-        )
+        // Legacy contextPatch is intentionally retained for decoding old batches,
+        // but formal cognition and project understanding are no longer auto-written.
+        let decisions: [DecisionRecord] = []
         let parents = try eventParents(taskID: taskID, in: project)
         let event = ProjectEvent(
             id: change.id,
@@ -388,6 +406,22 @@ public extension WorkstateService {
             sourceIDs: sourceIDs
         )
         project.events.append(event)
+
+        if let turningPoint = change.turningPoint {
+            guard turningPoint.projectID == project.id,
+                  turningPoint.originatingChangeID == change.id,
+                  turningPoint.timestamp == change.timestamp,
+                  Set(turningPoint.sourceIDs).isSubset(of: Set(sourceIDs)),
+                  turningPoint.worklineID == taskID else {
+                throw WorkstateStorageError.invalidState(
+                    "Timeline turning point does not match its ingestion change"
+                )
+            }
+            project.turningPoints = try ProjectTimelineTurningPointApplication.appending(
+                turningPoint,
+                to: project.turningPoints ?? []
+            )
+        }
 
         if let taskID,
            let taskIndex = project.tasks.firstIndex(where: { $0.id == taskID }) {

@@ -30,12 +30,16 @@ public struct ContextSnapshotProject: Codable, Equatable, Sendable {
     public var name: String
     public var status: ProjectStatus
     public var summary: String
-    public var purpose: String
-    public var inScope: [String]
-    public var outOfScope: [String]
-    public var understanding: [String]
-    public var acceptedDecisions: [String]
-    public var forbiddenDirections: [String]
+    public var cognitionState: ProjectCognitionState
+    public var cognition: ContextSnapshotCognition?
+}
+
+public struct ContextSnapshotCognition: Codable, Equatable, Sendable {
+    public var version: Int
+    public var sections: [ProjectCognitionSection]
+    public var pendingRevisions: [ProjectCognitionRevision]
+    public var confirmedAt: Date
+    public var updatedAt: Date
 }
 
 public struct ContextSnapshotDelta: Codable, Equatable, Identifiable, Sendable {
@@ -56,6 +60,7 @@ public struct ContextSnapshotWorkline: Codable, Equatable, Identifiable, Sendabl
     public var title: String
     public var objective: String
     public var status: TaskStatus
+    public var isFocused: Bool
     public var currentStage: LoopStage
     public var startedAt: Date
     public var updatedAt: Date
@@ -67,9 +72,13 @@ public struct ContextSourcePointer: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var label: String
     public var kind: String
+    public var provider: String
     public var locator: String
     public var threadID: String
     public var turnIDs: [String]
+    public var startOffset: UInt64?
+    public var endOffset: UInt64?
+    public var messageSpans: [ConversationSourceSpan]
 }
 
 public struct ContextSnapshotSemanticBundle: Codable, Equatable, Identifiable, Sendable {
@@ -105,18 +114,20 @@ public struct ContextSnapshot: Codable, Equatable, Sendable {
     public var project: ContextSnapshotProject
     public var worklines: [ContextSnapshotWorkline]
     public var openTopics: [ProjectTopic]
+    public var turningPoints: [ProjectTimelineTurningPoint]
     public var openSemanticBundles: [ContextSnapshotSemanticBundle]
     public var collaborationGuidance: [String]
     public var sources: [ContextSourcePointer]
 
     public init(
-        schemaVersion: Int = 1,
+        schemaVersion: Int = 3,
         generatedAt: Date = Date(),
         workspaceUpdatedAt: Date,
         scope: ContextSnapshotScope,
         project: ContextSnapshotProject,
         worklines: [ContextSnapshotWorkline],
         openTopics: [ProjectTopic],
+        turningPoints: [ProjectTimelineTurningPoint] = [],
         openSemanticBundles: [ContextSnapshotSemanticBundle] = [],
         collaborationGuidance: [String] = [],
         sources: [ContextSourcePointer]
@@ -128,6 +139,7 @@ public struct ContextSnapshot: Codable, Equatable, Sendable {
         self.project = project
         self.worklines = worklines
         self.openTopics = openTopics
+        self.turningPoints = turningPoints
         self.openSemanticBundles = openSemanticBundles
         self.collaborationGuidance = collaborationGuidance
         self.sources = sources
@@ -201,10 +213,13 @@ public struct ContextSnapshotBuilder: Sendable {
                 .map(\.id)
         )
         let matchingTasks = project.tasks.filter { task in
-            !threadSourceIDs.isDisjoint(with: task.sourceIDs)
-                || project.events(for: task.id).contains {
-                    !threadSourceIDs.isDisjoint(with: $0.sourceIDs)
-                }
+            Self.isCurrentWorkline(task)
+                && (
+                    !threadSourceIDs.isDisjoint(with: task.sourceIDs)
+                        || project.events(for: task.id).contains {
+                            !threadSourceIDs.isDisjoint(with: $0.sourceIDs)
+                        }
+                )
         }
         let selectedTasks = matchingTasks.isEmpty
             ? project.tasks.filter(Self.isCurrentWorkline)
@@ -240,6 +255,7 @@ public struct ContextSnapshotBuilder: Sendable {
                     title: task.title,
                     objective: task.objective,
                     status: task.status,
+                    isFocused: project.focusedTaskID == task.id,
                     currentStage: task.currentStage,
                     startedAt: task.startedAt,
                     updatedAt: task.updatedAt,
@@ -253,12 +269,26 @@ public struct ContextSnapshotBuilder: Sendable {
         let openTopics = project.topics
             .filter { $0.status == .captured || $0.status == .discussing }
             .sorted { $0.updatedAt > $1.updatedAt }
-        var referencedSourceIDs = project.context.understanding.flatMap(\.sourceIDs)
-        referencedSourceIDs.append(contentsOf: project.context.acceptedDecisions.flatMap(\.sourceIDs))
+        let cognition = handoffCognition(project.context.cognition)
+        let turningPoints = relevantTurningPoints(
+            project.turningPoints ?? [],
+            scope: scope,
+            selectedTasks: selectedTasks
+        )
+        var referencedSourceIDs: [String] = []
+        if let cognition {
+            referencedSourceIDs.append(contentsOf: cognition.sections.flatMap(\.sourceIDs))
+            referencedSourceIDs.append(contentsOf: cognition.pendingRevisions.flatMap { revision in
+                revision.sourceIDs
+                    + revision.beforeSections.flatMap(\.sourceIDs)
+                    + revision.afterSections.flatMap(\.sourceIDs)
+            })
+        }
         referencedSourceIDs.append(contentsOf: worklines.flatMap { $0.deltas.flatMap(\.sourceIDs) })
         referencedSourceIDs.append(
             contentsOf: openTopics.flatMap { $0.notes.last?.sourceIDs ?? [] }
         )
+        referencedSourceIDs.append(contentsOf: turningPoints.flatMap(\.sourceIDs))
         let sourceIDs = Set(referencedSourceIDs)
         let sources = workspace.sources
             .filter { sourceIDs.contains($0.id) }
@@ -267,9 +297,13 @@ public struct ContextSnapshotBuilder: Sendable {
                     id: $0.id,
                     label: $0.label,
                     kind: $0.kind,
+                    provider: $0.provider ?? ($0.threadID.isEmpty ? "workstate" : "codex"),
                     locator: $0.locator,
                     threadID: $0.threadID,
-                    turnIDs: $0.turnIDs
+                    turnIDs: $0.turnIDs,
+                    startOffset: $0.startOffset,
+                    endOffset: $0.endOffset,
+                    messageSpans: $0.messageSpans ?? []
                 )
             }
             .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
@@ -281,26 +315,13 @@ public struct ContextSnapshotBuilder: Sendable {
                 id: project.id,
                 name: project.name,
                 status: project.status,
-                summary: project.context.currentSummary.isEmpty
-                    ? project.summary
-                    : project.context.currentSummary,
-                purpose: project.context.purpose,
-                inScope: project.context.inScope,
-                outOfScope: project.context.outOfScope,
-                understanding: unique(
-                    project.context.understanding
-                    .filter { $0.status == .confirmed || $0.status == .observed }
-                    .map(\.text)
-                ),
-                acceptedDecisions: unique(
-                    project.context.acceptedDecisions
-                    .filter { $0.status == .confirmed }
-                    .map(\.text)
-                ),
-                forbiddenDirections: unique(project.context.forbiddenDirections)
+                summary: project.summary,
+                cognitionState: project.context.cognition?.state ?? .uninitialized,
+                cognition: cognition
             ),
             worklines: worklines,
             openTopics: openTopics,
+            turningPoints: turningPoints,
             collaborationGuidance: collaborationGuidance,
             sources: sources
         )
@@ -337,37 +358,82 @@ public struct ContextSnapshotBuilder: Sendable {
         }
     }
 
-    private func unique(_ values: [String]) -> [String] {
-        var seen = Set<String>()
-        return values.filter { value in
-            let key = value
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .lowercased()
-            guard !key.isEmpty, !seen.contains(key) else { return false }
-            seen.insert(key)
-            return true
+    private func handoffCognition(
+        _ cognition: ProjectCognitionDocument?
+    ) -> ContextSnapshotCognition? {
+        guard let cognition,
+              cognition.state == .confirmed,
+              let confirmedAt = cognition.confirmedAt else { return nil }
+        return ContextSnapshotCognition(
+            version: cognition.version,
+            sections: cognition.sections,
+            pendingRevisions: cognition.revisions.filter { $0.status == .pending },
+            confirmedAt: confirmedAt,
+            updatedAt: cognition.updatedAt
+        )
+    }
+
+    private func relevantTurningPoints(
+        _ turningPoints: [ProjectTimelineTurningPoint],
+        scope: ContextSnapshotScope,
+        selectedTasks: [TaskRecord]
+    ) -> [ProjectTimelineTurningPoint] {
+        let selectedTaskIDs = Set(selectedTasks.map(\.id))
+        let relevant = turningPoints.filter { point in
+            guard scope.kind != .project else { return true }
+            guard let worklineID = point.worklineID else { return true }
+            return selectedTaskIDs.contains(worklineID)
         }
+        return Array(relevant.sorted { $0.timestamp > $1.timestamp }.prefix(12))
     }
 
     private static func isCurrentWorkline(_ task: TaskRecord) -> Bool {
-        task.status == .active
+        task.status == .active || task.status == .waiting
     }
 }
 
 public struct ContextSnapshotMarkdownRenderer: Sendable {
     public init() {}
 
-    public func render(_ snapshot: ContextSnapshot) -> String {
+    public func render(
+        _ snapshot: ContextSnapshot,
+        sourceIndexPath: String? = nil
+    ) -> String {
         var lines = [
             "# \(snapshot.project.name)",
             "",
-            snapshot.project.summary
+            "## 交接信息",
+            "- Contract：Workstate Context Contract v\(snapshot.schemaVersion)",
+            "- 范围：\(snapshot.scope.kind.rawValue) / \(snapshot.scope.id)",
+            "- 生成时间：\(snapshot.generatedAt.ISO8601Format())",
+            "- 数据更新时间：\(snapshot.workspaceUpdatedAt.ISO8601Format())",
+            "- 项目状态：\(snapshot.project.status.rawValue)",
+            "",
+            "正式项目认知是本文件中的最高权威；待确认内容只能作为后续讨论线索。"
         ]
-        appendSection("目标", values: [snapshot.project.purpose], to: &lines)
-        appendSection("已确认的理解", values: snapshot.project.understanding, to: &lines)
-        appendSection("已确认的决定", values: snapshot.project.acceptedDecisions, to: &lines)
-        appendSection("禁止方向", values: snapshot.project.forbiddenDirections, to: &lines)
+        if let cognition = snapshot.project.cognition {
+            lines.append(contentsOf: ["", "## 项目认知 v\(cognition.version)"])
+            for section in cognition.sections.sorted(by: { $0.order < $1.order }) {
+                lines.append(contentsOf: ["", "### \(section.title)", section.body])
+                appendEvidence(section.sourceIDs, to: &lines, indentation: "")
+            }
+            if !cognition.pendingRevisions.isEmpty {
+                lines.append(contentsOf: ["", "## 待确认的认知修改"])
+                for revision in cognition.pendingRevisions {
+                    lines.append("- \(revision.rationale)")
+                    for section in revision.afterSections {
+                        lines.append("  - 提议：\(section.title)：\(section.body)")
+                    }
+                    appendEvidence(revision.sourceIDs, to: &lines, indentation: "  ")
+                }
+            }
+        } else {
+            let notice = snapshot.project.cognitionState == .draft
+                ? "项目认知草稿尚未确认；以下旧摘要仅用于识别项目，不能视为完整事实。"
+                : "项目认知尚未建立；以下旧摘要仅用于识别项目，不能视为完整事实。"
+            lines.append(contentsOf: ["", notice])
+            appendSection("旧项目摘要", values: [snapshot.project.summary], to: &lines)
+        }
 
         if !snapshot.worklines.isEmpty {
             lines.append(contentsOf: ["", "## 当前工作"])
@@ -375,12 +441,31 @@ public struct ContextSnapshotMarkdownRenderer: Sendable {
                 lines.append("")
                 lines.append("### \(workline.title)")
                 lines.append("- 状态：\(workline.status.rawValue) / \(workline.currentStage.rawValue)")
+                lines.append("- 当前焦点：\(workline.isFocused ? "是" : "否")")
+                lines.append("- 最近更新：\(workline.updatedAt.ISO8601Format())")
                 if !workline.objective.isEmpty {
                     lines.append("- 目标：\(workline.objective)")
                 }
                 for delta in workline.deltas {
-                    lines.append("- \(delta.title)：\(delta.summary)")
+                    lines.append("- [\(delta.timestamp.ISO8601Format())] \(delta.title)：\(delta.summary)")
+                    appendEvidence(delta.sourceIDs, to: &lines, indentation: "  ")
                 }
+            }
+        }
+
+        if !snapshot.turningPoints.isEmpty {
+            lines.append(contentsOf: ["", "## 关键转折"])
+            for point in snapshot.turningPoints {
+                lines.append("")
+                lines.append("### [\(turningPointScopeLabel(point.scope))] \(point.title)")
+                lines.append("- 时间：\(point.timestamp.ISO8601Format())")
+                lines.append("- 之前：\(point.beforeMeaning)")
+                lines.append("- 现在：\(point.afterMeaning)")
+                if let worklineID = point.worklineID {
+                    lines.append("- 工作线：\(worklineID)")
+                }
+                lines.append("- 变化节点：\(point.originatingChangeID)")
+                appendEvidence(point.sourceIDs, to: &lines, indentation: "")
             }
         }
 
@@ -405,13 +490,60 @@ public struct ContextSnapshotMarkdownRenderer: Sendable {
         appendSection("协作方式", values: snapshot.collaborationGuidance, to: &lines)
 
         if !snapshot.sources.isEmpty {
-            lines.append(contentsOf: ["", "## 来源"])
-            lines.append(contentsOf: snapshot.sources.map { source in
-                let thread = source.threadID.isEmpty ? "" : " · codex://threads/\(source.threadID)"
-                return "- \(source.label)：\(source.locator)\(thread)"
-            })
+            lines.append(contentsOf: ["", "## 精确来源"])
+            if let sourceIndexPath {
+                lines.append("- 索引文件：\(sourceIndexPath)")
+                lines.append("- 来源数量：\(snapshot.sources.count)")
+                lines.append("- 仅在核对具体事实时读取索引，并按 source ID 定位原始证据。")
+            } else {
+                for source in snapshot.sources {
+                    lines.append("")
+                    lines.append("- [\(source.id)] \(source.label)")
+                    lines.append("  - 类型：\(source.kind)")
+                    lines.append("  - Provider：\(source.provider)")
+                    if !source.threadID.isEmpty {
+                        lines.append("  - 会话：codex://threads/\(source.threadID)")
+                    }
+                    if !source.turnIDs.isEmpty {
+                        lines.append("  - Turns：\(source.turnIDs.joined(separator: ", "))")
+                    }
+                    if !source.locator.isEmpty {
+                        lines.append("  - 文件：\(source.locator)")
+                    }
+                    if let startOffset = source.startOffset, let endOffset = source.endOffset {
+                        lines.append("  - 字节范围：\(startOffset)..<\(endOffset)")
+                    }
+                    if !source.messageSpans.isEmpty {
+                        let spans = source.messageSpans.map {
+                            "\($0.kind.rawValue) \($0.startOffset)..<\($0.endOffset)"
+                        }
+                        lines.append("  - 消息范围：\(spans.joined(separator: "; "))")
+                    }
+                }
+            }
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func turningPointScopeLabel(_ scope: ProjectTimelineTurningPointScope) -> String {
+        switch scope {
+        case .project: "项目"
+        case .module: "模块"
+        case .interaction: "交互"
+        case .informationArchitecture: "信息架构"
+        case .workline: "工作线"
+        case .productModel: "产品模型"
+        }
+    }
+
+    private func appendEvidence(
+        _ sourceIDs: [String],
+        to lines: inout [String],
+        indentation: String
+    ) {
+        let ids = Array(Set(sourceIDs)).sorted()
+        guard !ids.isEmpty else { return }
+        lines.append("\(indentation)- 证据：\(ids.joined(separator: ", "))")
     }
 
     private func appendSection(_ title: String, values: [String], to lines: inout [String]) {

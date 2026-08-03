@@ -141,7 +141,11 @@ struct WorkstateCLI {
                 }
             switch arguments.value("format") ?? "markdown" {
             case "markdown":
-                print(ContextSnapshotMarkdownRenderer().render(snapshot), terminator: "")
+                let handoff = try ContextHandoffExporter(
+                    root: repository.paths.root
+                ).export(snapshot)
+                let markdown = try String(contentsOf: handoff.url, encoding: .utf8)
+                print(markdown, terminator: "")
             case "json":
                 try printJSON(snapshot)
             default:

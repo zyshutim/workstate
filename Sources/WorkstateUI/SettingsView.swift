@@ -41,6 +41,12 @@ struct SettingsView: View {
                         : "关闭期间的新内容不会进入 Workstate。")
                         .font(WorkstateTheme.captionFont)
                         .foregroundStyle(WorkstateTheme.secondaryLabel)
+
+                    Picker("整理间隔", selection: $draft.quietIntervalMinutes) {
+                        ForEach(WorkstateSettings.quietIntervalOptionsMinutes, id: \.self) { minutes in
+                            Text(intervalLabel(minutes)).tag(minutes)
+                        }
+                    }
                 }
 
                 Section("Agent") {
@@ -60,6 +66,9 @@ struct SettingsView: View {
             Divider()
 
             HStack {
+                Button("停止服务并退出", role: .destructive) {
+                    model.stopServiceAndExit()
+                }
                 Spacer()
                 Button("取消", action: model.closeSettings)
                 Button("保存") {
@@ -72,6 +81,15 @@ struct SettingsView: View {
             .padding(14)
         }
         .background(WorkstateTheme.windowBackground)
+    }
+
+    private func intervalLabel(_ minutes: Int) -> String {
+        guard minutes >= 60 else { return "每 \(minutes) 分钟" }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        return remainingMinutes == 0
+            ? "每 \(hours) 小时"
+            : "每 \(hours) 小时 \(remainingMinutes) 分钟"
     }
 }
 

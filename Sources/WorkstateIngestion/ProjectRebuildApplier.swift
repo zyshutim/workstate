@@ -209,6 +209,7 @@ public struct ProjectRebuildApplier: Sendable {
             }
             let allSourceIDs = sourceIDs(validated.referencedEvidenceIDs)
             let context = ProjectContext(
+                cognition: oldProject.context.cognition,
                 currentSummary: proposal.currentSummary,
                 purpose: proposal.purpose,
                 inScope: proposal.inScope,

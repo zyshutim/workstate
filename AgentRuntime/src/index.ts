@@ -15,6 +15,20 @@ import { createRequire } from "node:module";
 import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
+import {
+  isPersistentProjectOwnerMode,
+  ownerChatHistoryPromptContext,
+  planProjectOwnerSession,
+  projectOwnerCodexArgs,
+  projectOwnerCodexHome,
+  projectOwnerSessionRegistryPath,
+  recordProjectOwnerSession,
+  requireProjectOwnerProjectId,
+  requireWorkstateRuntimeRoot,
+  resetProjectOwnerSession,
+  resetProjectOwnerSessionMode,
+  type ProjectOwnerSessionPlan,
+} from "./project-owner-session.js";
 
 type Segment = {
   id: string;
@@ -82,6 +96,32 @@ type ProjectDecision = {
   rationale: string;
 };
 
+type CognitionPayload = {
+  state: "uninitialized" | "draft" | "confirmed";
+  version: number;
+  sections: Array<{
+    id: string;
+    title: string;
+    body: string;
+    purpose: string;
+    inclusionRules: string[];
+    exclusionRules: string[];
+    updateTriggers: string[];
+    coverage: string[];
+    order: number;
+    sourceIDs: string[];
+  }>;
+  pendingRevisions: Array<{
+    id: string;
+    operation: string;
+    status: string;
+    baseVersion: number;
+    touchedSectionIDs: string[];
+    rationale: string;
+    sourceIDs: string[];
+  }>;
+};
+
 type OpenSemanticBundle = {
   id: string;
   threadID: string;
@@ -116,9 +156,10 @@ type RuntimeRequest = {
       mode: "steward";
       segment: Segment;
       project: ProjectSummary & {
-        currentUnderstanding: ProjectUnderstanding[];
-        acceptedDecisions: ProjectDecision[];
-        forbiddenDirections: string[];
+        cognition?: CognitionPayload | null;
+        identity: { id: string; name: string; purpose: string; summary: string };
+        topics: Array<{ id: string; title: string; summary: string; status: string; kind: string }>;
+        activeWorklines: ProjectSummary["activeWorklines"];
         recentDeltas: Array<{ title: string; summary: string; kind: string; timestamp: string }>;
       };
     }
@@ -126,11 +167,19 @@ type RuntimeRequest = {
       mode: "batch_steward";
       segments: Segment[];
       project: ProjectSummary & {
-        currentUnderstanding: ProjectUnderstanding[];
-        acceptedDecisions: ProjectDecision[];
-        forbiddenDirections: string[];
+        cognition?: CognitionPayload | null;
+        identity: { id: string; name: string; purpose: string; summary: string };
+        topics: Array<{ id: string; title: string; summary: string; status: string; kind: string }>;
+        activeWorklines: ProjectSummary["activeWorklines"];
         recentDeltas: Array<{ title: string; summary: string; kind: string; timestamp: string }>;
       };
+    }
+  | {
+      mode: "cognition_draft";
+      project: {
+        identity: { id: string; name: string; purpose: string; summary: string };
+      };
+      segments: Segment[];
     }
   | {
       mode: "rebuild";
@@ -152,9 +201,8 @@ type RuntimeRequest = {
   | {
       mode: "owner_chat";
       project: ProjectSummary & {
-        currentUnderstanding: ProjectUnderstanding[];
-        acceptedDecisions: ProjectDecision[];
-        forbiddenDirections: string[];
+        cognition?: CognitionPayload | null;
+        identity: { id: string; name: string; purpose: string; summary: string };
         recentDeltas: Array<{ title: string; summary: string; kind: string; timestamp: string }>;
         topics: Array<{
           id: string;
@@ -206,6 +254,10 @@ type RuntimeRequest = {
           detail: string;
         }>;
       }>;
+    }
+  | {
+      mode: typeof resetProjectOwnerSessionMode;
+      projectId: string;
     }
 );
 
@@ -404,6 +456,67 @@ const stewardTopicUpdateSchema = {
   additionalProperties: false,
 } as const;
 
+const cognitionProposalSectionSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    title: { type: "string" },
+    body: { type: "string" },
+    purpose: { type: "string" },
+    inclusionRules: { type: "array", items: { type: "string" } },
+    exclusionRules: { type: "array", items: { type: "string" } },
+    updateTriggers: { type: "array", items: { type: "string" } },
+    coverage: {
+      type: "array",
+      items: {
+        type: "string",
+        enum: ["projectPurpose", "currentUnderstanding", "decisionPrinciples", "currentState"],
+      },
+    },
+    order: { type: "integer", minimum: 0 },
+  },
+  required: [
+    "id", "title", "body", "purpose", "inclusionRules", "exclusionRules",
+    "updateTriggers", "coverage", "order",
+  ],
+  additionalProperties: false,
+} as const;
+
+const cognitionProposalSchema = {
+  type: "object",
+  properties: {
+    operation: { type: "string", enum: ["none", "update", "insert", "delete", "split", "merge"] },
+    summary: { type: "string" },
+    beforeSectionIDs: { type: "array", items: { type: "string" } },
+    afterSections: { type: "array", items: cognitionProposalSectionSchema },
+  },
+  required: ["operation", "summary", "beforeSectionIDs", "afterSections"],
+  additionalProperties: false,
+} as const;
+
+const timelineTurningPointSchema = {
+  type: "object",
+  properties: {
+    scope: {
+      type: "string",
+      enum: [
+        "none",
+        "project",
+        "module",
+        "interaction",
+        "informationArchitecture",
+        "workline",
+        "productModel",
+      ],
+    },
+    title: { type: "string" },
+    beforeMeaning: { type: "string" },
+    afterMeaning: { type: "string" },
+  },
+  required: ["scope", "title", "beforeMeaning", "afterMeaning"],
+  additionalProperties: false,
+} as const;
+
 const stewardSchema = {
   type: "object",
   properties: {
@@ -461,7 +574,8 @@ const stewardSchema = {
       enum: ["unchanged", "changed", "checked", "rendered", "userAccepted", "integrated", "published"],
     },
     facts: { type: "array", items: { type: "string" } },
-    contextPatch: stewardContextPatchSchema,
+    cognitionProposal: cognitionProposalSchema,
+    turningPoint: timelineTurningPointSchema,
     topicUpdates: { type: "array", items: stewardTopicUpdateSchema },
   },
   required: [
@@ -483,7 +597,8 @@ const stewardSchema = {
     "stage",
     "delivery",
     "facts",
-    "contextPatch",
+    "cognitionProposal",
+    "turningPoint",
     "topicUpdates",
   ],
   additionalProperties: false,
@@ -509,10 +624,49 @@ const batchStewardSchema = {
   additionalProperties: false,
 } as const;
 
+const cognitionDraftSectionSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    title: { type: "string" },
+    body: { type: "string" },
+    purpose: { type: "string" },
+    inclusionRules: { type: "array", items: { type: "string" } },
+    exclusionRules: { type: "array", items: { type: "string" } },
+    updateTriggers: { type: "array", items: { type: "string" } },
+    coverage: {
+      type: "array",
+      items: {
+        type: "string",
+        enum: ["projectPurpose", "currentUnderstanding", "decisionPrinciples", "currentState"],
+      },
+    },
+    order: { type: "integer", minimum: 0 },
+    sourceIDs: { type: "array", items: { type: "string" }, minItems: 1 },
+  },
+  required: [
+    "id", "title", "body", "purpose", "inclusionRules", "exclusionRules",
+    "updateTriggers", "coverage", "order", "sourceIDs",
+  ],
+  additionalProperties: false,
+} as const;
+
+const cognitionDraftSchema = {
+  type: "object",
+  properties: {
+    isReady: { type: "boolean" },
+    missingContext: { type: "array", items: { type: "string" } },
+    sections: { type: "array", items: cognitionDraftSectionSchema },
+  },
+  required: ["isReady", "missingContext", "sections"],
+  additionalProperties: false,
+} as const;
+
 const ownerChatSchema = {
   type: "object",
   properties: {
     reply: { type: "string" },
+    cognitionProposal: cognitionProposalSchema,
     topicUpdates: {
       type: "array",
       items: {
@@ -546,7 +700,7 @@ const ownerChatSchema = {
       },
     },
   },
-  required: ["reply", "topicUpdates"],
+  required: ["reply", "cognitionProposal", "topicUpdates"],
   additionalProperties: false,
 } as const;
 
@@ -924,13 +1078,21 @@ When evidence corrects earlier project understanding, record the correction as a
 Never infer userAccepted, integrated, rendered, or published without direct evidence in the turn.
 Keep title short and summary to one sentence. Retain at most four facts.
 
-Maintain Project HEAD separately from the event:
-- Use contextPatch only when this evidence materially changes durable project-level understanding, an explicit decision, or a prohibited direction. Ordinary task progress leaves every contextPatch string and array empty.
-- currentSummary is a complete concise replacement for the Project HEAD, not the event summary. Leave it empty when the HEAD does not change.
-- Every non-empty contextPatch requires a short revisionTitle, revisionSummary, revisionStatus, and concrete changes.
-- For existing understanding or decisions, preserve the supplied id. New ids must be stable project-prefixed kebab-case.
-- Use confirmed only for the user's explicit decision or correction. Use observed for directly evidenced product/runtime state and inferred only for a Steward inference.
-- Mark replaced understanding or decisions through the supplied exact ids. Add or remove forbidden directions only when the user explicitly establishes or reverses them.
+Maintain project cognition separately from the event:
+- Use cognitionProposal only for a material change to confirmed project cognition or its structure. Ordinary progress must return operation "none" with empty arrays and summary.
+- Project cognition is the canonical current description of what the project is, why it exists, what its core objects mean, how they relate, and which user-confirmed principles and boundaries govern them. It is not a history, status recap, recommendation, or Owner strategy.
+- Propose cognition changes only from an explicit user correction or a decision the user has clearly confirmed. Never create product direction, priority, risk, tradeoff, or next-step judgments on the user's behalf.
+- A cognitionProposal is a proposal, not a fact. Return at most one for one semantic change.
+- Copy exact existing section ids into beforeSectionIDs. Return complete replacement sections in afterSections.
+- update is 1 -> 1 with the same id; insert is 0 -> 1+; delete is 1+ -> 0; split is 1 -> 2+; merge is 2+ -> 1.
+- Preserve unaffected section wording, Markdown hierarchy, and Project Owner report voice. Do not rewrite the whole document for a local change.
+
+Mark user-facing timeline turning points separately from project cognition:
+- Use scope none with empty title and before/after meaning for ordinary progress, implementation detail, debugging, verification, acceptance, integration, or delivery-only changes.
+- Mark a turning point only when this durable change alters how a human should understand the project, a module, an interaction, the information architecture, a workline's meaning, or the product model.
+- Module- and interaction-level changes qualify when they materially replace an established model. Examples include changing an established split layout from top/bottom to left/right, or placing Storyboard inside the material-cognition system.
+- Describe the prior meaning and the newly established meaning directly. Keep the marker concise and selective. Do not use it to claim rendered, accepted, integrated, or published state.
+- This marker is maintained automatically by the Project Owner and does not require a user approval proposal.
 
 Maintain unfinished topics separately:
 - futureDecision means the user has not decided whether to proceed;
@@ -996,7 +1158,12 @@ Return semantic project changes, not one decision per turn:
 - for none, nextFocusedWorklineId is empty.
 - closureDisposition is none unless worklineAction is complete_existing. It is completed for settled work, awaiting_verification when a result or acceptance is still unknown, and future_decision when later product choice remains.
 - for awaiting_verification and future_decision, provide concise carryoverTitle, carryoverSummary, and carryoverQuestions; otherwise leave them empty.
-- apply the same contextPatch rules as the single-turn Steward. Consolidate connected evidence into one Project HEAD revision instead of rewriting it turn by turn.
+- Use cognitionProposal only for a material change to the confirmed project cognition or its structure. Ordinary progress must return operation "none" with empty arrays and summary.
+- Project cognition is the canonical current description of what the project is, why it exists, what its core objects mean, how they relate, and which user-confirmed principles and boundaries govern them. It is not a history, status recap, recommendation, or Owner strategy.
+- Propose cognition changes only from an explicit user correction or a decision the user has clearly confirmed. Never create product direction, priority, risk, tradeoff, or next-step judgments on the user's behalf.
+- Return at most one cognitionProposal for one semantic change in this whole batch. A proposal is not a fact and must not be phrased as already confirmed.
+- Copy exact existing section ids into beforeSectionIDs and return complete replacement sections in afterSections. update is 1 -> 1, insert is 0 -> 1+, delete is 1+ -> 0, split is 1 -> 2+, and merge is 2+ -> 1. Preserve the existing Markdown hierarchy and Project Owner report voice.
+- For every returned change, set turningPoint scope to none with empty text unless the change materially replaces a human-facing project, module, interaction, information-architecture, workline, or product-model meaning. Module-level changes count; routine implementation, debugging, verification, acceptance, integration, and delivery-only updates do not. A real turning point must contain a concise title plus direct beforeMeaning and afterMeaning, and it never claims delivery state.
 
 Simulate the consequences of each earlier semantic change before deciding the next one. A later change may continue, complete, or switch away from a workline created earlier in this same batch. For continue_existing and complete_existing, use only an id in INITIAL ACTIVE WORKLINE IDS or an id created by an earlier start_new change in this output. Any workline mentioned only in evidence or recent history is inactive and cannot be resumed; start a new bounded workline instead. Use stable project-prefixed ids for new worklines. Do not inspect files or use tools. Never infer user acceptance, rendered behavior, integration, or publication without direct evidence.
 
@@ -1011,25 +1178,74 @@ ${JSON.stringify(request.segments)}
 `;
 }
 
-function ownerChatPrompt(request: Extract<RuntimeRequest, { mode: "owner_chat" }>): string {
-  return `You are the Project Owner for exactly one project. You share responsibility for the product with the user and maintain the same project-level understanding supplied below.
+function cognitionDraftPrompt(request: Extract<RuntimeRequest, { mode: "cognition_draft" }>): string {
+  return `You are the Project Knowledge Owner maintaining the first durable current-project document for exactly one project.
 
-Talk with the user directly in Chinese. Help them reason about unfinished topics, future todos, product direction, tradeoffs, and priorities. Use the project HEAD as durable memory, and use the conversation history for continuity.
+"Owner" means you own the accuracy, completeness, and continuity of project knowledge. The user alone owns product direction, priorities, tradeoffs, and final decisions. Do not make those decisions for the user.
 
-Do not behave like a passive recorder or a generic assistant. Form an independent view, identify contradictions, and distinguish confirmed project facts from your inference. Keep the reply concise enough for an ongoing conversation.
+Use only the supplied real conversation segments. Do not inspect files or use tools. Do not invent missing facts.
+Return isReady=false with a non-empty missingContext array and an empty sections array when the evidence is insufficient.
+Return isReady=true only when sections are non-empty and missingContext is empty.
+
+Create the canonical current understanding of the project. A future user or Agent must be able to learn:
+- what the project is and why it exists;
+- which concepts, objects, or subsystems are central and what each one means;
+- how those objects relate, where their responsibilities begin and end, and why the confirmed design is organized this way;
+- which principles, constraints, and conclusions the user has confirmed;
+- the project's current factual state, without replaying how it changed.
+
+The document must contain only current valid conclusions. Omit superseded alternatives, abandoned explorations, conversation chronology, and the history of how understanding changed. Exclude unresolved ideas from the document. Use missingContext only when the evidence cannot establish the project's core identity or a coherent current model; otherwise leave unresolved material out for the topic system.
+
+Report contract:
+- Return 3 to 6 project-specific sections, not a generic checklist.
+- The first section defines the project and its reason for existing. Give it a project-specific title.
+- Organize the remaining sections around the project's real information model. Important objects must be explained through definition, responsibility, relationships, boundaries, and confirmed rationale. Do not substitute a module inventory for explanation.
+- The visible section structure may vary by project. Keep hidden maintenance metadata specific enough that later updates can preserve the structure and change only the affected section.
+- Write every body as clean, concise Markdown. Do not repeat the section title inside the body. Prefer short paragraphs and use bullets only when comparison or decomposition improves comprehension.
+- State confirmed project knowledge directly. Do not add labels such as **Owner 判断**, **仍需验证**, or an executive recommendation.
+- Never propose product direction, priorities, risks, tradeoffs, or next steps. Include a choice or rationale only when the evidence shows that the user already confirmed it.
+- Never use the Chinese contrast template "不是……而是……". Avoid translationese, slogans, consultant language, and empty phrases such as "持续优化", "进一步完善", or "目前取得了一定进展".
+- Do not narrate when individual conversations happened or describe a transition from an earlier model to the current one. Timeline and revision detail belong in project history.
+
+The sections as a whole must cover:
+- projectPurpose: why this project exists;
+- currentUnderstanding: how the project should currently be understood;
+- decisionPrinciples: principles that guide choices;
+- currentState: what has been achieved and where it is now.
+Every section must include a stable id, title, body, purpose, inclusionRules, exclusionRules, updateTriggers, coverage, order, and sourceIDs.
+sourceIDs must copy only exact segment ids from the supplied evidence. Keep the document compact enough to reread, but complete enough for another Agent to understand the current project without asking the user to restate its concepts and confirmed rationale.
+
+PROJECT IDENTITY:
+${JSON.stringify(request.project.identity)}
+
+REAL SOURCE SEGMENTS:
+${JSON.stringify(request.segments)}
+`;
+}
+
+function ownerChatPrompt(
+  request: Extract<RuntimeRequest, { mode: "owner_chat" }>,
+  historyContext: string,
+): string {
+  return `You are the Project Knowledge Owner for exactly one project. You own the accuracy and continuity of project knowledge. The user alone owns product direction, priorities, tradeoffs, and final decisions.
+
+Talk with the user directly in natural, concise Chinese. Help them retrieve project knowledge, clarify concepts, organize unfinished topics and compare user-supplied alternatives. Use confirmed project cognition as durable memory and conversation history for continuity.
+
+Do not choose a direction, assign priority, declare a risk, or recommend a next step unless the user explicitly asks for analysis. When analysis is requested, explain evidence and consequences without claiming decision authority. Identify contradictions and missing information instead of resolving them silently. Never use the Chinese contrast template "不是……而是……".
 
 The user's new ideas, possible directions, future work, and unresolved product questions are NOT confirmed project facts. Discuss them and persist them as captured or discussing topics. Use futureDecision when the user has not decided whether to do something. Use awaitingVerification only when work already happened but its completion, result, acceptance, or external feedback remains unknown. Never label a new proposal as confirmed. Only the user-facing confirmation UI can promote a topic into the formal project flow; you cannot confirm decisions or create tasks.
 
+When the user explicitly corrects project knowledge or confirms a conclusion that materially changes the current document, return one cognitionProposal using the tracked-change contract. It remains pending until the user accepts it in the document UI. Ordinary discussion returns operation "none" with empty arrays and summary. Copy exact existing section ids into beforeSectionIDs and return complete replacement sections in afterSections; use update 1 -> 1, insert 0 -> 1+, delete 1+ -> 0, split 1 -> 2+, or merge 2+ -> 1. Never silently rewrite the whole document. Preserve its Markdown hierarchy and current-project voice. Do not put discussion history, Owner recommendations, or unresolved ideas into project cognition.
+
 Return topicUpdates when this turn creates durable unfinished work or materially changes an existing topic. Ordinary questions or chatter may return an empty array. Prefer updating ACTIVE TOPIC when supplied. Otherwise match an existing topic semantically before creating one. A single user turn should normally create at most one evolving topic: keep connected ideas together as one topic with multiple questions instead of fragmenting them. Split only when the user explicitly identifies independent backlog items. A correction must update the topic and append a userCorrection note. Use a stable kebab-case topicId for creation. Do not claim in reply that anything was approved, implemented, or scheduled.
 
-PROJECT HEAD:
+PROJECT CONTEXT:
 ${JSON.stringify(request.project)}
 
 UNSETTLED CODEX DISCUSSIONS:
 ${JSON.stringify(request.openBundles)}
 
-OWNER CONVERSATION HISTORY:
-${JSON.stringify(request.history)}
+${historyContext}
 
 ACTIVE TOPIC:
 ${request.activeTopicId || "none"}
@@ -1220,6 +1436,30 @@ async function readableFileExists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function initializeCodexHome(codexHome: string): Promise<void> {
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
+  const targetAuth = join(codexHome, "auth.json");
+  if (await readableFileExists(targetAuth)) {
+    return;
+  }
+  const sourceCodexHome = process.env.WORKSTATE_SOURCE_CODEX_HOME?.trim()
+    || process.env.CODEX_HOME?.trim()
+    || join(homedir(), ".codex");
+  const sourceAuth = join(sourceCodexHome, "auth.json");
+  if (!await readableFileExists(sourceAuth)) {
+    throw new Error(`Codex authentication file is missing: ${sourceAuth}`);
+  }
+  try {
+    await symlink(sourceAuth, targetAuth);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      throw new Error(`Workstate Codex authentication file is not readable: ${targetAuth}`);
+    }
+    throw error;
   }
 }
 
@@ -1529,6 +1769,7 @@ async function runCodexProcess(
 ): Promise<CodexProcessRun> {
   const environment = { ...process.env };
   environment.CODEX_HOME = codexHome;
+  environment.HOME = dirname(codexHome);
   if (executable.pathDirectories.length > 0) {
     environment.PATH = [
       ...executable.pathDirectories,
@@ -1763,11 +2004,14 @@ async function runCodexProcess(
   });
 }
 
-async function runEphemeralCodex(
+async function runCodexWithHome(
   prompt: string,
   outputSchema: unknown,
   profile: RuntimeProfile,
   mode: string,
+  codexHome: string,
+  argsFor: (schemaPath: string, responsePath: string) => string[],
+  fallbackRunId: string,
 ): Promise<{
   runId: string;
   result: unknown;
@@ -1778,43 +2022,13 @@ async function runEphemeralCodex(
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "workstate-codex-"));
   const schemaPath = join(temporaryDirectory, "output-schema.json");
   const responsePath = join(temporaryDirectory, "final-response.json");
-  const isolatedCodexHome = join(temporaryDirectory, "codex-home");
-  const runId = `ephemeral-run-${randomUUID().toLowerCase()}`;
   let invocationFailed = false;
   let processRun: CodexProcessRun | null = null;
   const invocationStartedAt = Date.now();
 
   try {
-    await mkdir(isolatedCodexHome, { recursive: true, mode: 0o700 });
-    const sourceCodexHome = process.env.WORKSTATE_SOURCE_CODEX_HOME?.trim()
-      || process.env.CODEX_HOME?.trim()
-      || join(homedir(), ".codex");
-    const sourceAuth = join(sourceCodexHome, "auth.json");
-    if (!await readableFileExists(sourceAuth)) {
-      throw new Error(`Codex authentication file is missing: ${sourceAuth}`);
-    }
-    await symlink(sourceAuth, join(isolatedCodexHome, "auth.json"));
     await writeFile(schemaPath, JSON.stringify(outputSchema), { encoding: "utf8", mode: 0o600 });
-    const args = [
-      "exec",
-      "--ephemeral",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--sandbox", "read-only",
-      "--cd", process.cwd(),
-      "--skip-git-repo-check",
-      "--model", profile.model,
-      "--config", "approval_policy=\"never\"",
-      "--config", `model_reasoning_effort="${profile.reasoning}"`,
-      "--config", "sandbox_workspace_write.network_access=false",
-      "--config", "web_search=\"disabled\"",
-      "--output-schema", schemaPath,
-      "--output-last-message", responsePath,
-      "--color", "never",
-      "--json",
-      "-",
-    ];
-    processRun = await runCodexProcess(executable, args, prompt, isolatedCodexHome);
+    processRun = await runCodexProcess(executable, argsFor(schemaPath, responsePath), prompt, codexHome);
 
     const responseStats = await stat(responsePath);
     if (responseStats.size > 8 * 1024 * 1024) {
@@ -1832,7 +2046,7 @@ async function runEphemeralCodex(
       codex_pid: processRun.codexPid,
     };
     return {
-      runId: processRun.threadId || runId,
+      runId: processRun.threadId || fallbackRunId,
       result: JSON.parse(finalResponse) as unknown,
       usage: processRun.usage,
       telemetry,
@@ -1876,9 +2090,166 @@ async function runEphemeralCodex(
   }
 }
 
+async function runEphemeralCodex(
+  prompt: string,
+  outputSchema: unknown,
+  profile: RuntimeProfile,
+  mode: string,
+): Promise<{
+  runId: string;
+  result: unknown;
+  usage: AgentUsage;
+  telemetry: RunTelemetry;
+}> {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "workstate-codex-"));
+  const isolatedCodexHome = join(temporaryDirectory, "codex-home");
+  let completed = false;
+  try {
+    await initializeCodexHome(isolatedCodexHome);
+    const run = await runCodexWithHome(
+      prompt,
+      outputSchema,
+      profile,
+      mode,
+      isolatedCodexHome,
+      (schemaPath, responsePath) => [
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--sandbox", "read-only",
+        "--cd", process.cwd(),
+        "--skip-git-repo-check",
+        "--model", profile.model,
+        "--config", "approval_policy=\"never\"",
+        "--config", `model_reasoning_effort="${profile.reasoning}"`,
+        "--config", "sandbox_workspace_write.network_access=false",
+        "--config", "web_search=\"disabled\"",
+        "--output-schema", schemaPath,
+        "--output-last-message", responsePath,
+        "--color", "never",
+        "--json",
+        "-",
+      ],
+      `ephemeral-run-${randomUUID().toLowerCase()}`,
+    );
+    completed = true;
+    return run;
+  } finally {
+    try {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      if (completed) {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        throw new Error(`Failed to remove Codex temporary directory: ${message}`);
+      }
+    }
+  }
+}
+
+type PersistentProjectOwnerSession = {
+  projectId: string;
+  registryPath: string;
+  codexHome: string;
+  plan: ProjectOwnerSessionPlan;
+};
+
+async function runPersistentProjectOwnerCodex(
+  prompt: string,
+  outputSchema: unknown,
+  profile: RuntimeProfile,
+  mode: string,
+  session: PersistentProjectOwnerSession,
+): Promise<{
+  runId: string;
+  result: unknown;
+  usage: AgentUsage;
+  telemetry: RunTelemetry;
+}> {
+  await initializeCodexHome(session.codexHome);
+  try {
+    const run = await runCodexWithHome(
+      prompt,
+      outputSchema,
+      profile,
+      mode,
+      session.codexHome,
+      (schemaPath, responsePath) => projectOwnerCodexArgs({
+        plan: session.plan,
+        schemaPath,
+        responsePath,
+        model: profile.model,
+        reasoning: profile.reasoning,
+        cwd: process.cwd(),
+      }),
+      session.plan.kind === "resume" ? session.plan.threadId : "",
+    );
+    if (session.plan.kind === "resume") {
+      if (run.runId !== session.plan.threadId) {
+        throw new Error(
+          `Codex resumed a different thread (${run.runId || "none"}) than the stored thread ${session.plan.threadId}`,
+        );
+      }
+      return run;
+    }
+    await recordProjectOwnerSession(session.registryPath, session.projectId, run.runId);
+    return run;
+  } catch (error) {
+    if (session.plan.kind !== "resume") {
+      throw error;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Project Owner Codex session resume failed for project ${session.projectId} (thread ${session.plan.threadId}). `
+      + `The registry entry was preserved and no fresh session was started. `
+      + `After diagnosing the stored session as stale or corrupt, send mode ${resetProjectOwnerSessionMode} with this projectId, then retry. `
+      + `Resume detail: ${detail}`,
+    );
+  }
+}
+
+function projectIdForPersistentOwnerRequest(request: RuntimeRequest): string {
+  switch (request.mode) {
+    case "cognition_draft":
+      return requireProjectOwnerProjectId(request.project.identity.id);
+    case "steward":
+    case "batch_steward":
+    case "owner_chat":
+      return requireProjectOwnerProjectId(request.project.id);
+    default:
+      throw new Error(`Mode ${request.mode} does not use a persistent Project Owner session`);
+  }
+}
+
 async function main(): Promise<void> {
   cleanupStaleAgentLease();
   const request = await readRequest();
+  if (request.mode === resetProjectOwnerSessionMode) {
+    const runtimeRoot = requireWorkstateRuntimeRoot(process.env.WORKSTATE_RUNTIME_ROOT);
+    const result = await resetProjectOwnerSession(projectOwnerSessionRegistryPath(runtimeRoot), request.projectId);
+    process.stdout.write(
+      JSON.stringify({
+        mode: request.mode,
+        runtimeThreadId: result.removedThreadId ?? "",
+        usage: null,
+        telemetry: null,
+        result,
+      }),
+    );
+    return;
+  }
+  let persistentSession: PersistentProjectOwnerSession | null = null;
+  if (isPersistentProjectOwnerMode(request.mode)) {
+    const runtimeRoot = requireWorkstateRuntimeRoot(process.env.WORKSTATE_RUNTIME_ROOT);
+    const projectId = projectIdForPersistentOwnerRequest(request);
+    const registryPath = projectOwnerSessionRegistryPath(runtimeRoot);
+    persistentSession = {
+      projectId,
+      registryPath,
+      codexHome: projectOwnerCodexHome(runtimeRoot),
+      plan: await planProjectOwnerSession(registryPath, projectId),
+    };
+  }
   let distilledCorpus: string | undefined;
   if (request.mode === "rebuild") {
     const evidenceStats = await stat(request.evidencePath);
@@ -1895,12 +2266,17 @@ async function main(): Promise<void> {
       ? stewardPrompt(request)
     : request.mode === "batch_steward"
       ? batchStewardPrompt(request)
+      : request.mode === "cognition_draft"
+        ? cognitionDraftPrompt(request)
       : request.mode === "collaboration_steward"
         ? collaborationStewardPrompt(request)
       : request.mode === "global_chat_route"
         ? globalChatRoutePrompt(request)
       : request.mode === "owner_chat"
-        ? ownerChatPrompt(request)
+        ? ownerChatPrompt(
+          request,
+          ownerChatHistoryPromptContext(persistentSession!.plan, request.history),
+        )
       : request.mode === "brief"
         ? briefPrompt(request)
       : request.mode === "distill"
@@ -1914,6 +2290,8 @@ async function main(): Promise<void> {
       ? stewardSchema
     : request.mode === "batch_steward"
       ? batchStewardSchema
+      : request.mode === "cognition_draft"
+        ? cognitionDraftSchema
       : request.mode === "collaboration_steward"
         ? collaborationStewardSchema
       : request.mode === "global_chat_route"
@@ -1925,7 +2303,15 @@ async function main(): Promise<void> {
       : request.mode === "distill"
         ? distillSchema
         : constrainedRebuildSchema(distilledCorpus!);
-  const run = await runEphemeralCodex(prompt, outputSchema, request.profile, request.mode);
+  const run = persistentSession
+    ? await runPersistentProjectOwnerCodex(
+      prompt,
+      outputSchema,
+      request.profile,
+      request.mode,
+      persistentSession,
+    )
+    : await runEphemeralCodex(prompt, outputSchema, request.profile, request.mode);
   try {
     let result = run.result;
     if (request.mode === "batch_route") {

@@ -61,6 +61,14 @@ public struct WorkspaceReconciler: Sendable {
             for statement in project.context.understanding { used.formUnion(statement.sourceIDs) }
             for revision in project.context.revisions { used.formUnion(revision.sourceIDs) }
             for decision in project.context.acceptedDecisions { used.formUnion(decision.sourceIDs) }
+            if let cognition = project.context.cognition {
+                for section in cognition.sections { used.formUnion(section.sourceIDs) }
+                for revision in cognition.revisions {
+                    used.formUnion(revision.sourceIDs)
+                    for section in revision.beforeSections { used.formUnion(section.sourceIDs) }
+                    for section in revision.afterSections { used.formUnion(section.sourceIDs) }
+                }
+            }
             for task in project.tasks { used.formUnion(task.sourceIDs) }
             for event in project.events {
                 used.formUnion(event.sourceIDs)

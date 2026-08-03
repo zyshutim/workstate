@@ -35,6 +35,8 @@ public final class WorkstateViewModel: ObservableObject {
     @Published public private(set) var modelCatalogError: String?
     @Published public private(set) var copiedHandoffProjectID: String?
     @Published public private(set) var isManualSyncing = false
+    @Published public private(set) var cognitionGeneratingProjectIDs: Set<String> = []
+    @Published public private(set) var cognitionMissingContext: [String: [String]] = [:]
 
     public let repository: WorkstateRepository
     private let service: WorkstateService
@@ -52,6 +54,7 @@ public final class WorkstateViewModel: ObservableObject {
     private var lastModificationDate: Date?
     private var lastSettingsModificationDate: Date?
     private var conversationRuntime: AppHostedConversationRuntime?
+    private var isStopping = false
 
     public init(repository: WorkstateRepository = .init()) {
         self.repository = repository
@@ -153,6 +156,103 @@ public final class WorkstateViewModel: ObservableObject {
         isSettingsPresented = false
     }
 
+    public func generateProjectCognition(projectID: String) {
+        guard !cognitionGeneratingProjectIDs.contains(projectID),
+              let project = workspace.project(id: projectID) else { return }
+
+        cognitionGeneratingProjectIDs.insert(projectID)
+        cognitionMissingContext[projectID] = nil
+        let runtime = agentRuntime
+        let currentWorkspace = workspace
+        let scanner = CodexSessionScanner(runtimeRoot: repository.paths.root)
+
+        Task { [weak self] in
+            do {
+                let generation = try await Task.detached(priority: .userInitiated) {
+                    try runtime.generateProjectCognitionDraft(
+                        project: project,
+                        workspace: currentWorkspace,
+                        scanner: scanner
+                    )
+                }.value
+                guard let self else { return }
+                if generation.isReady {
+                    do {
+                        self.workspace = try self.service.saveProjectCognitionDraft(
+                            projectID: projectID,
+                            sections: generation.sections,
+                            generatedAt: Date()
+                        )
+                        try? runtime.recordProjectCognitionDraftSaved(projectID: projectID)
+                    } catch {
+                        try? runtime.recordProjectCognitionDraftSaveFailure(
+                            projectID: projectID,
+                            error: error
+                        )
+                        throw error
+                    }
+                    self.lastModificationDate = self.repository.modificationDate()
+                } else {
+                    self.cognitionMissingContext[projectID] = generation.missingContext
+                }
+                self.errorMessage = nil
+            } catch {
+                self?.errorMessage = error.localizedDescription
+            }
+            self?.cognitionGeneratingProjectIDs.remove(projectID)
+        }
+    }
+
+    public func confirmProjectCognition(projectID: String) {
+        do {
+            workspace = try service.confirmProjectCognitionDraft(projectID: projectID)
+            lastModificationDate = repository.modificationDate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func resolveProjectCognitionRevision(
+        projectID: String,
+        revisionID: String,
+        resolution: ProjectCognitionRevisionResolution,
+        editedAfterSections: [ProjectCognitionSection]? = nil
+    ) {
+        do {
+            workspace = try service.resolveProjectCognitionRevision(
+                projectID: projectID,
+                revisionID: revisionID,
+                resolution: resolution,
+                editedAfterSections: editedAfterSections
+            )
+            lastModificationDate = repository.modificationDate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func stopServiceAndExit() {
+        guard !isStopping else { return }
+        isStopping = true
+        conversationRuntime?.stop()
+        conversationRuntime = nil
+        agentRuntime.cancelActiveProcess()
+
+        let stopped = RuntimeSnapshot(activity: .stopped, detail: "服务已手动停止")
+        _ = try? runtimeStatusRepository.saveIfChanged(stopped)
+        runtimeStatus = stopped
+        liveActivities = []
+
+        var stoppedSettings = settings
+        stoppedSettings.liveMonitoringEnabled = false
+        stoppedSettings.liveMonitoringStartedAt = nil
+        try? settingsRepository.save(stoppedSettings)
+        settings = stoppedSettings
+        NSApplication.shared.terminate(nil)
+    }
+
     public func presentGlobalChat() {
         do {
             globalConversation = try globalConversationRepository.load()
@@ -186,12 +286,17 @@ public final class WorkstateViewModel: ObservableObject {
         do {
             var updated = normalizedSettings(value)
             updated.setupCompleted = settings.setupCompleted
+            let quietIntervalChanged = updated.quietIntervalMinutes != settings.quietIntervalMinutes
             if updated.liveMonitoringEnabled != settings.liveMonitoringEnabled {
                 updated.liveMonitoringStartedAt = updated.liveMonitoringEnabled ? Date() : nil
             }
             try settingsRepository.save(updated)
             settings = updated
             lastSettingsModificationDate = settingsModificationDate()
+            if quietIntervalChanged {
+                conversationRuntime?.stop()
+                conversationRuntime = nil
+            }
             configureConversationRuntime()
             errorMessage = nil
         } catch {
@@ -434,6 +539,11 @@ public final class WorkstateViewModel: ObservableObject {
                     userMessageID: userMessage.id,
                     ownerMessageID: ownerMessage.id
                 )
+                try self.applyOwnerCognitionProposal(
+                    response.cognitionProposal,
+                    projectID: projectID,
+                    userMessage: userMessage
+                )
                 var completedConversation = self.ownerConversation(for: projectID)
                 completedConversation.messages.append(ownerMessage)
                 completedConversation.updatedAt = Date()
@@ -468,6 +578,42 @@ public final class WorkstateViewModel: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func applyOwnerCognitionProposal(
+        _ proposal: StewardCognitionProposal,
+        projectID: String,
+        userMessage: ProjectOwnerMessage
+    ) throws {
+        guard !proposal.isEmpty else { return }
+        let source = SourceReference(
+            id: "source-owner-chat-\(projectID)-\(userMessage.id)",
+            kind: "owner_chat",
+            label: "Project Owner 对话",
+            locator: "",
+            turnIDs: [userMessage.id],
+            excerpt: [
+                ConversationMessage(
+                    id: userMessage.id,
+                    role: "user",
+                    text: userMessage.text,
+                    timestamp: userMessage.timestamp
+                )
+            ]
+        )
+        workspace = try service.addSource(source)
+        guard let currentProject = workspace.project(id: projectID),
+              let revision = try ProjectCognitionProposalMapper().map(
+                proposal,
+                project: currentProject,
+                sourceIDs: [source.id],
+                timestamp: userMessage.timestamp
+              ) else { return }
+        workspace = try service.upsertProjectCognitionRevision(
+            projectID: projectID,
+            revision: revision
+        )
+        lastModificationDate = repository.modificationDate()
     }
 
     public func sendGlobalMessage(_ rawMessage: String) {
@@ -565,6 +711,16 @@ public final class WorkstateViewModel: ObservableObject {
                     activeTopicID: nil,
                     userMessageID: userMessage.id,
                     ownerMessageID: ownerMessage.id
+                )
+                try self.applyOwnerCognitionProposal(
+                    response.cognitionProposal,
+                    projectID: project.id,
+                    userMessage: ProjectOwnerMessage(
+                        id: userMessage.id,
+                        role: .user,
+                        text: userMessage.text,
+                        timestamp: userMessage.timestamp
+                    )
                 )
 
                 var completed = self.globalConversation
@@ -1051,6 +1207,9 @@ public final class WorkstateViewModel: ObservableObject {
     private func applyRuntimeSnapshot(_ snapshot: RuntimeSnapshot) {
         runtimeStatus = snapshot
         liveActivities = snapshot.liveActivities
+        if snapshot.activity == .idle || snapshot.activity == .failed {
+            reload(force: true)
+        }
     }
 
     private func loadOwnerConversation(projectID: String) {

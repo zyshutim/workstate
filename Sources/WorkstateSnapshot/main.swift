@@ -123,6 +123,9 @@ struct WorkstateSnapshot {
                 )
             )
         }
+        if mode == "cognition" {
+            try seedCognitionFixture(repository: repository, projectID: projectID)
+        }
         let model = WorkstateViewModel(repository: repository)
 
         if mode != "graph" && mode != "projects" && mode != "reviews" && mode != "brief" {
@@ -182,6 +185,76 @@ struct WorkstateSnapshot {
         }
         try png.write(to: URL(fileURLWithPath: output), options: .atomic)
         print(output)
+    }
+
+    private static func seedCognitionFixture(
+        repository: WorkstateRepository,
+        projectID: String
+    ) throws {
+        _ = try repository.update(
+            mutation: WorkspaceMutation(kind: "snapshot.cognition", summary: "Seed cognition fixture")
+        ) { snapshot in
+            guard let projectIndex = snapshot.projects.firstIndex(where: { $0.id == projectID }) else {
+                throw WorkstateStorageError.missingProject(projectID)
+            }
+            guard let sourceID = snapshot.projects[projectIndex].sourceIDs.first
+                ?? snapshot.sources.first?.id else {
+                throw SnapshotError.renderFailed
+            }
+            let canonical = ProjectCognitionSection(
+                id: "product-picture",
+                title: "产品全貌",
+                body: """
+                **已确认**：Reframe 通过素材图谱、故事板和时间线协同组织剪辑事实。
+
+                - Agent 操作业务对象，但不替代事实来源。
+                - 素材与时间线继续持有可验证的剪辑事实。
+                """,
+                purpose: "保持项目的产品模型、设计原则和当前阶段一致",
+                inclusionRules: ["项目级模型与稳定设计原则"],
+                exclusionRules: ["普通任务进度与临时调试"],
+                updateTriggers: ["产品模型或整体阶段发生变化"],
+                coverage: ProjectCognitionCoverage.allCases,
+                sourceIDs: [sourceID],
+                order: 0
+            )
+            let proposed = ProjectCognitionSection(
+                id: canonical.id,
+                title: canonical.title,
+                body: """
+                **Owner 判断**：候选池已经成为连接素材理解与编排决策的关键对象。
+
+                - 素材图谱负责组织可验证事实。
+                - 故事板负责表达创作意图。
+                - 候选池连接理解与选择，时间线承载最终编排。
+                """,
+                purpose: canonical.purpose,
+                inclusionRules: canonical.inclusionRules,
+                exclusionRules: canonical.exclusionRules,
+                updateTriggers: canonical.updateTriggers,
+                coverage: canonical.coverage,
+                sourceIDs: [sourceID],
+                order: 0
+            )
+            snapshot.projects[projectIndex].context.cognition = ProjectCognitionDocument(
+                state: .confirmed,
+                version: 1,
+                sections: [canonical],
+                revisions: [
+                    ProjectCognitionRevision(
+                        id: "snapshot-cognition-revision",
+                        operation: .update,
+                        beforeSections: [canonical],
+                        afterSections: [proposed],
+                        baseVersion: 1,
+                        rationale: "候选池已经成为稳定产品对象，需要进入项目认知。",
+                        sourceIDs: [sourceID]
+                    )
+                ],
+                confirmedAt: Date(),
+                updatedAt: Date()
+            )
+        }
     }
 
     private static func dailyBriefFixture(_ source: WorkspaceSnapshot) -> WorkspaceSnapshot {

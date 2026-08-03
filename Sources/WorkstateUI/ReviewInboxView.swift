@@ -313,6 +313,7 @@ struct ConversationEvidence: View {
         if !source.threadID.isEmpty {
             return URL(string: "codex://threads/\(source.threadID)")
         }
+        guard !source.locator.isEmpty else { return nil }
         return source.locator.hasPrefix("/")
             ? URL(fileURLWithPath: source.locator)
             : URL(string: source.locator)

@@ -79,6 +79,31 @@ public struct AgentRuntimeClient: Sendable {
         processRegistry.cancelActiveProcess()
     }
 
+    @discardableResult
+    public func resetProjectOwnerSession(projectID: String) throws -> String? {
+        let normalizedProjectID = projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedProjectID.isEmpty else {
+            throw WorkstateStorageError.invalidState(
+                "Project Owner session reset requires a project id"
+            )
+        }
+        let request = ResetProjectOwnerSessionRequest(
+            mode: "reset_owner_session",
+            projectId: normalizedProjectID
+        )
+        let envelope: RuntimeEnvelope<ResetProjectOwnerSessionResult> = try run(
+            request,
+            timeout: 30
+        )
+        guard envelope.mode == request.mode,
+              envelope.result.projectId == normalizedProjectID else {
+            throw WorkstateStorageError.invalidState(
+                "Project Owner session reset returned the wrong project"
+            )
+        }
+        return envelope.result.removedThreadId
+    }
+
     public func route(
         segment: SessionSegment,
         workspace: WorkspaceSnapshot,
@@ -293,6 +318,7 @@ public struct AgentRuntimeClient: Sendable {
         var semanticChanges = Set<Data>()
         var activeWorklineIDs = Set(project.tasks.filter { $0.status == .active }.map(\.id))
         var knownWorklineIDs = Set(project.tasks.map(\.id))
+        var cognitionProposalCount = 0
         for change in envelope.result.changes {
             try validateStewardResult(change.result)
             try validateStewardWorklineState(
@@ -300,6 +326,9 @@ public struct AgentRuntimeClient: Sendable {
                 activeWorklineIDs: &activeWorklineIDs,
                 knownWorklineIDs: &knownWorklineIDs
             )
+            if let proposal = change.result.cognitionProposal, !proposal.isEmpty {
+                cognitionProposalCount += 1
+            }
             guard !change.evidenceIds.isEmpty,
                   Set(change.evidenceIds).isSubset(of: expected),
                   change.result.classification == "ordinary_delta" else {
@@ -323,7 +352,145 @@ public struct AgentRuntimeClient: Sendable {
             }
             previousIndex = firstIndex
         }
+        guard cognitionProposalCount <= 1 else {
+            throw WorkstateStorageError.invalidState(
+                "A Steward batch may contain at most one cognition proposal"
+            )
+        }
         return envelope.result
+    }
+
+    public func generateProjectCognitionDraft(
+        project: ProjectRecord,
+        workspace: WorkspaceSnapshot,
+        scanner: CodexSessionScanner
+    ) throws -> ProjectCognitionDraftGeneration {
+        guard workspace.project(id: project.id) != nil else {
+            throw WorkstateStorageError.missingProject(project.id)
+        }
+        let projectSourceIDs = Set(project.sourceIDs)
+        let sources = workspace.sources.filter { source in
+            projectSourceIDs.contains(source.id)
+                && source.kind == "conversation"
+                && !source.threadID.isEmpty
+                && !source.turnIDs.isEmpty
+        }
+        var sourceIDByPointer: [ConversationSourcePointerID: String] = [:]
+        for source in sources {
+            for turnID in source.turnIDs {
+                sourceIDByPointer[
+                    ConversationSourcePointerID(
+                        provider: source.provider ?? "codex",
+                        threadID: source.threadID,
+                        turnID: turnID
+                    )
+                ] = source.id
+            }
+        }
+        let records = try scanner.pointerRecords(ids: Array(sourceIDByPointer.keys))
+        let materialized = try scanner.segments(pointerRecords: records)
+        var evidenceBySegmentID: [String: (segment: SessionSegment, sourceID: String)] = [:]
+        for segment in materialized {
+            let pointerID = ConversationSourcePointerID(
+                provider: "codex",
+                threadID: segment.threadID,
+                turnID: segment.turnID
+            )
+            if let sourceID = sourceIDByPointer[pointerID] {
+                evidenceBySegmentID[segment.id] = (segment, sourceID)
+            }
+        }
+        for source in sources where !evidenceBySegmentID.values.contains(where: {
+            $0.sourceID == source.id
+        }) {
+            let messages = try scanner.resolveMessages(for: source)
+            guard let segment = fallbackCognitionSegment(source: source, messages: messages) else {
+                continue
+            }
+            evidenceBySegmentID[segment.id] = (segment, source.id)
+        }
+        let bounded = boundedCognitionSegments(evidenceBySegmentID.values.map(\.segment))
+        let sourceIDBySegmentID = Dictionary(uniqueKeysWithValues: bounded.compactMap { segment in
+            evidenceBySegmentID[segment.id].map { (segment.id, $0.sourceID) }
+        })
+        guard !bounded.isEmpty else {
+            return ProjectCognitionDraftGeneration(
+                sections: [],
+                missingContext: ["项目没有可用的真实会话证据"],
+                isReady: false
+            )
+        }
+        let request = CognitionDraftRequest(
+            mode: "cognition_draft",
+            profile: try runtimeProfile(.steward),
+            project: CognitionDraftProjectPayload(project: project),
+            segments: bounded
+        )
+        let envelope: RuntimeEnvelope<CognitionDraftResult> = try run(request, timeout: 600)
+        try writeCognitionDraftAttempt(
+            CognitionDraftAttemptRecord(
+                projectID: project.id,
+                status: "received",
+                error: "",
+                runtimeThreadID: envelope.runtimeThreadId,
+                usage: envelope.usage,
+                telemetry: envelope.telemetry,
+                result: envelope.result
+            )
+        )
+        try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: scanner)
+        try appendRun(envelope, segmentID: "cognition-draft:\(project.id)")
+        do {
+            guard envelope.result.isReady == (envelope.result.sections.isEmpty == false),
+                  envelope.result.isReady == envelope.result.missingContext.isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "Cognition draft readiness and payload are inconsistent"
+                )
+            }
+            let mappedSections = try envelope.result.sections.map { section in
+                let sourceIDs = try section.sourceIDs.map { sourceID in
+                    guard let mapped = sourceIDBySegmentID[sourceID] else {
+                        throw WorkstateStorageError.invalidState(
+                            "Cognition draft referenced unknown evidence: \(sourceID)"
+                        )
+                    }
+                    return mapped
+                }
+                return try decodeCognitionSection(
+                    section,
+                    sourceIDs: Array(Set(sourceIDs)).sorted()
+                )
+            }
+            try updateCognitionDraftAttempt(
+                projectID: project.id,
+                status: envelope.result.isReady ? "validated" : "notReady",
+                error: ""
+            )
+            return ProjectCognitionDraftGeneration(
+                sections: mappedSections,
+                missingContext: envelope.result.missingContext,
+                isReady: envelope.result.isReady
+            )
+        } catch {
+            try? updateCognitionDraftAttempt(
+                projectID: project.id,
+                status: "validationFailed",
+                error: error.localizedDescription
+            )
+            throw error
+        }
+    }
+
+    public func recordProjectCognitionDraftSaved(projectID: String) throws {
+        try updateCognitionDraftAttempt(projectID: projectID, status: "saved", error: "")
+    }
+
+    public func recordProjectCognitionDraftSaveFailure(projectID: String, error: Error) throws {
+        try updateCognitionDraftAttempt(
+            projectID: projectID,
+            status: "saveFailed",
+            error: error.localizedDescription
+        )
     }
 
     private func validateStewardResult(_ result: StewardResult) throws {
@@ -336,6 +503,8 @@ public struct AgentRuntimeClient: Sendable {
         if result.classification == "no_change" {
             guard result.worklineAction == "none",
                   result.contextPatch?.isEmpty != false,
+                  result.cognitionProposal?.isEmpty != false,
+                  result.turningPoint?.isEmpty != false,
                   (result.topicUpdates ?? []).isEmpty else {
                 throw WorkstateStorageError.invalidState(
                     "A no-change Steward result cannot mutate worklines or Project HEAD"
@@ -375,13 +544,73 @@ public struct AgentRuntimeClient: Sendable {
                 "A durable Steward result requires a title and summary"
             )
         }
-        if let patch = result.contextPatch, !patch.isEmpty {
-            guard !patch.revisionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !patch.revisionSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        if let proposal = result.cognitionProposal {
+            try validateCognitionProposal(proposal)
+        }
+        if let turningPoint = result.turningPoint {
+            try validateTurningPoint(turningPoint)
+        }
+    }
+
+    private func validateTurningPoint(_ turningPoint: StewardTurningPoint) throws {
+        if turningPoint.isEmpty {
+            guard turningPoint.title.isEmpty,
+                  turningPoint.beforeMeaning.isEmpty,
+                  turningPoint.afterMeaning.isEmpty else {
                 throw WorkstateStorageError.invalidState(
-                    "A Project HEAD patch requires revision context"
+                    "An empty timeline turning point cannot contain meaning"
                 )
             }
+            return
+        }
+        let supportedScopes = Set(ProjectTimelineTurningPointScope.allCases.map(\.rawValue))
+        guard supportedScopes.contains(turningPoint.scope),
+              !turningPoint.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !turningPoint.beforeMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !turningPoint.afterMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              turningPoint.beforeMeaning != turningPoint.afterMeaning else {
+            throw WorkstateStorageError.invalidState(
+                "Timeline turning point has an unsupported scope or meaning"
+            )
+        }
+    }
+
+    private func validateCognitionProposal(_ proposal: StewardCognitionProposal) throws {
+        if proposal.isEmpty {
+            guard proposal.summary.isEmpty,
+                  proposal.beforeSectionIDs.isEmpty,
+                  proposal.afterSections.isEmpty else {
+                throw WorkstateStorageError.invalidState(
+                    "An empty cognition proposal cannot contain changes"
+                )
+            }
+            return
+        }
+        guard !proposal.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkstateStorageError.invalidState("A cognition proposal requires a summary")
+        }
+        let beforeCount = proposal.beforeSectionIDs.count
+        let afterCount = proposal.afterSections.count
+        let hasValidShape = switch proposal.operation {
+        case "update": beforeCount == 1 && afterCount == 1
+        case "insert": beforeCount == 0 && afterCount >= 1
+        case "delete": beforeCount >= 1 && afterCount == 0
+        case "split": beforeCount == 1 && afterCount >= 2
+        case "merge": beforeCount >= 2 && afterCount == 1
+        default: false
+        }
+        guard hasValidShape,
+              Set(proposal.beforeSectionIDs).count == beforeCount,
+              Set(proposal.afterSections.map(\.id)).count == afterCount,
+              proposal.afterSections.allSatisfy({
+                  !$0.id.isEmpty
+                      && !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      && !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      && !$0.purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) else {
+            throw WorkstateStorageError.invalidState(
+                "A cognition proposal has an invalid structure"
+            )
         }
     }
 
@@ -494,11 +723,13 @@ public struct AgentRuntimeClient: Sendable {
             activeTopicId: activeTopicID ?? ""
         )
         let envelope: RuntimeEnvelope<ProjectOwnerChatResult> = try run(request, timeout: 300)
+        try validateCognitionProposal(envelope.result.cognitionProposal)
         try excludePersistentRuntimeThread(envelope.runtimeThreadId, scanner: CodexSessionScanner())
         try appendRun(envelope, segmentID: "owner-chat:\(project.id):\(UUID().uuidString.lowercased())")
         return ProjectOwnerChatResponse(
             reply: envelope.result.reply,
             topicUpdates: envelope.result.topicUpdates,
+            cognitionProposal: envelope.result.cognitionProposal,
             runtimeThreadID: envelope.runtimeThreadId
         )
     }
@@ -608,6 +839,108 @@ public struct AgentRuntimeClient: Sendable {
         let workspaceHasProjects = (try? repository.load().projects.isEmpty == false) ?? false
         let settings = try settingsRepository.load(workspaceHasProjects: workspaceHasProjects)
         return RuntimeProfilePayload(settings.profile(for: role))
+    }
+
+    private func boundedCognitionSegments(_ segments: [SessionSegment]) -> [SessionSegment] {
+        let maximumBytes = 256 * 1024
+        var result: [SessionSegment] = []
+        var bytes = 0
+        for segment in segments.sorted(by: { $0.timestamp > $1.timestamp }).prefix(80) {
+            let size = (try? WorkstateCoding.makeEncoder(pretty: false).encode(segment).count) ?? Int.max
+            guard size <= maximumBytes, bytes + size <= maximumBytes else { continue }
+            result.append(segment)
+            bytes += size
+        }
+        return result.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private func fallbackCognitionSegment(
+        source: SourceReference,
+        messages: [ConversationMessage]
+    ) -> SessionSegment? {
+        guard let turnID = source.turnIDs.last, !messages.isEmpty else { return nil }
+        let userText = messages
+            .filter { $0.role == "user" }
+            .map(\.text)
+            .joined(separator: "\n\n")
+        let assistantText = messages.last(where: { $0.role == "assistant" })?.text ?? ""
+        guard !userText.isEmpty || !assistantText.isEmpty else { return nil }
+        let timestamp = messages.compactMap(\.timestamp).max() ?? .distantPast
+        let startOffset = source.startOffset ?? 0
+        return SessionSegment(
+            threadID: source.threadID,
+            turnID: turnID,
+            sourcePath: source.locator,
+            startOffset: startOffset,
+            endOffset: max(startOffset, source.endOffset ?? startOffset),
+            cwd: "",
+            userText: userText,
+            assistantText: assistantText,
+            timestamp: timestamp,
+            relatedTurnIDs: source.turnIDs,
+            sourceSpans: source.messageSpans
+        )
+    }
+
+    private func decodeCognitionSection(
+        _ section: CognitionDraftSectionPayload,
+        sourceIDs: [String]
+    ) throws -> ProjectCognitionSection {
+        var object = try JSONSerialization.jsonObject(
+            with: WorkstateCoding.makeEncoder(pretty: false).encode(section)
+        ) as? [String: Any] ?? [:]
+        object["sourceIDs"] = sourceIDs
+        return try WorkstateCoding.makeDecoder().decode(
+            ProjectCognitionSection.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
+    private func writeCognitionDraftAttempt(_ record: CognitionDraftAttemptRecord) throws {
+        let url = try cognitionDraftAttemptURL(projectID: record.projectID)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try WorkstateCoding.makeEncoder().encode(record)
+        guard data.count <= 8 * 1024 * 1024 else {
+            throw WorkstateStorageError.invalidState(
+                "Cognition draft diagnostic exceeded 8 MiB"
+            )
+        }
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func updateCognitionDraftAttempt(
+        projectID: String,
+        status: String,
+        error: String
+    ) throws {
+        let url = try cognitionDraftAttemptURL(projectID: projectID)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw WorkstateStorageError.invalidState(
+                "Missing cognition draft diagnostic for \(projectID)"
+            )
+        }
+        var record = try WorkstateCoding.makeDecoder().decode(
+            CognitionDraftAttemptRecord.self,
+            from: Data(contentsOf: url)
+        )
+        record.status = status
+        record.error = error
+        record.updatedAt = Date()
+        try writeCognitionDraftAttempt(record)
+    }
+
+    private func cognitionDraftAttemptURL(projectID: String) throws -> URL {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        guard let fileName = projectID.addingPercentEncoding(withAllowedCharacters: allowed),
+              !fileName.isEmpty else {
+            throw WorkstateStorageError.invalidState("Invalid cognition project id")
+        }
+        return runtimeRoot
+            .appendingPathComponent("cognition-attempts", isDirectory: true)
+            .appendingPathComponent("\(fileName)-latest.json")
     }
 
     private func excludePersistentRuntimeThread(
@@ -972,6 +1305,8 @@ public struct StewardResult: Codable, Equatable, Sendable {
     public var delivery: String
     public var facts: [String]
     public var contextPatch: StewardContextPatch?
+    public var cognitionProposal: StewardCognitionProposal?
+    public var turningPoint: StewardTurningPoint?
     public var topicUpdates: [StewardTopicUpdate]?
 
     public init(
@@ -994,6 +1329,8 @@ public struct StewardResult: Codable, Equatable, Sendable {
         delivery: String,
         facts: [String],
         contextPatch: StewardContextPatch? = nil,
+        cognitionProposal: StewardCognitionProposal? = nil,
+        turningPoint: StewardTurningPoint? = nil,
         topicUpdates: [StewardTopicUpdate]? = nil
     ) {
         self.classification = classification
@@ -1015,8 +1352,92 @@ public struct StewardResult: Codable, Equatable, Sendable {
         self.delivery = delivery
         self.facts = facts
         self.contextPatch = contextPatch
+        self.cognitionProposal = cognitionProposal
+        self.turningPoint = turningPoint
         self.topicUpdates = topicUpdates
     }
+}
+
+public struct StewardCognitionProposal: Codable, Equatable, Sendable {
+    public var operation: String
+    public var summary: String
+    public var beforeSectionIDs: [String]
+    public var afterSections: [StewardCognitionSectionProposal]
+
+    public var isEmpty: Bool {
+        operation == "none"
+    }
+}
+
+public struct StewardCognitionSectionProposal: Codable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var body: String
+    public var purpose: String
+    public var inclusionRules: [String]
+    public var exclusionRules: [String]
+    public var updateTriggers: [String]
+    public var coverage: [String]
+    public var order: Int
+}
+
+public struct StewardTurningPoint: Codable, Equatable, Sendable {
+    public var scope: String
+    public var title: String
+    public var beforeMeaning: String
+    public var afterMeaning: String
+
+    public var isEmpty: Bool {
+        scope == "none"
+    }
+}
+
+public struct ProjectCognitionDraftGeneration: Equatable, Sendable {
+    public var sections: [ProjectCognitionSection]
+    public var missingContext: [String]
+    public var isReady: Bool
+
+    public init(
+        sections: [ProjectCognitionSection],
+        missingContext: [String],
+        isReady: Bool
+    ) {
+        self.sections = sections
+        self.missingContext = missingContext
+        self.isReady = isReady
+    }
+}
+
+private struct CognitionDraftResult: Codable {
+    var isReady: Bool
+    var missingContext: [String]
+    var sections: [CognitionDraftSectionPayload]
+}
+
+private struct CognitionDraftAttemptRecord: Codable {
+    var schemaVersion = 1
+    var projectID: String
+    var status: String
+    var error: String
+    var receivedAt = Date()
+    var updatedAt = Date()
+    var runtimeThreadID: String
+    var usage: AgentUsage?
+    var telemetry: AgentRunTelemetry?
+    var result: CognitionDraftResult
+}
+
+private struct CognitionDraftSectionPayload: Codable {
+    var id: String
+    var title: String
+    var body: String
+    var purpose: String
+    var inclusionRules: [String]
+    var exclusionRules: [String]
+    var updateTriggers: [String]
+    var coverage: [String]
+    var order: Int
+    var sourceIDs: [String]
 }
 
 public struct StewardTopicUpdate: Codable, Equatable, Sendable {
@@ -1127,11 +1548,13 @@ public struct DistillationResult: Codable, Equatable, Sendable {
 public struct ProjectOwnerChatResult: Codable, Equatable, Sendable {
     public var reply: String
     public var topicUpdates: [ProjectOwnerTopicUpdate]
+    public var cognitionProposal: StewardCognitionProposal
 }
 
 public struct ProjectOwnerChatResponse: Equatable, Sendable {
     public var reply: String
     public var topicUpdates: [ProjectOwnerTopicUpdate]
+    public var cognitionProposal: StewardCognitionProposal
     public var runtimeThreadID: String
 }
 
@@ -1231,6 +1654,16 @@ private struct RouteRequest: Codable {
     var priorRoute: RouteBindingPayload?
     var recentTurns: [SessionSegment]
     var openBundles: [OpenSemanticBundlePayload]
+}
+
+private struct ResetProjectOwnerSessionRequest: Codable {
+    var mode: String
+    var projectId: String
+}
+
+private struct ResetProjectOwnerSessionResult: Codable {
+    var projectId: String
+    var removedThreadId: String?
 }
 
 private struct OpenSemanticBundlePayload: Codable {
@@ -1384,6 +1817,13 @@ private struct BatchStewardRequest: Codable {
     var project: StewardProjectPayload
 }
 
+private struct CognitionDraftRequest: Codable {
+    var mode: String
+    var profile: RuntimeProfilePayload
+    var project: CognitionDraftProjectPayload
+    var segments: [SessionSegment]
+}
+
 private struct RebuildRequest: Codable {
     var mode: String
     var profile: RuntimeProfilePayload
@@ -1491,7 +1931,7 @@ private struct ProjectPayload: Codable {
     init(project: ProjectRecord) {
         id = project.id
         name = project.name
-        summary = boundedText(project.context.currentSummary, limit: 4_000)
+        summary = boundedText(project.summary, limit: 4_000)
         purpose = boundedText(project.context.purpose, limit: 2_000)
         status = project.status.rawValue
         focusedWorklineId = project.focusedTaskID ?? ""
@@ -1511,16 +1951,15 @@ private struct StewardProjectPayload: Codable {
     var status: String
     var focusedWorklineId: String
     var activeWorklines: [WorklinePayload]
-    var currentUnderstanding: [StewardUnderstandingPayload]
-    var acceptedDecisions: [StewardDecisionPayload]
-    var forbiddenDirections: [String]
+    var identity: CognitionIdentityPayload
+    var cognition: StewardCognitionPayload?
     var recentDeltas: [DeltaPayload]
     var topics: [TopicPayload]
 
     init(project: ProjectRecord) {
         id = project.id
         name = project.name
-        summary = boundedText(project.context.currentSummary, limit: 4_000)
+        summary = boundedText(project.summary, limit: 4_000)
         purpose = boundedText(project.context.purpose, limit: 2_000)
         status = project.status.rawValue
         focusedWorklineId = project.focusedTaskID ?? ""
@@ -1529,18 +1968,8 @@ private struct StewardProjectPayload: Codable {
             .sorted { $0.updatedAt > $1.updatedAt }
             .prefix(20)
             .map(WorklinePayload.init)
-        currentUnderstanding = project.context.understanding
-            .filter { $0.status == .confirmed || $0.status == .observed || $0.status == .inferred }
-            .sorted { $0.updatedAt > $1.updatedAt }
-            .prefix(50)
-            .map(StewardUnderstandingPayload.init)
-        acceptedDecisions = project.context.acceptedDecisions
-            .filter { $0.status == .confirmed }
-            .prefix(50)
-            .map(StewardDecisionPayload.init)
-        forbiddenDirections = project.context.forbiddenDirections.prefix(30).map {
-            boundedText($0, limit: 1_000)
-        }
+        identity = CognitionIdentityPayload(project: project)
+        cognition = project.context.cognition.map(StewardCognitionPayload.init)
         recentDeltas = project.events
             .sorted { $0.timestamp > $1.timestamp }
             .prefix(6)
@@ -1550,6 +1979,66 @@ private struct StewardProjectPayload: Codable {
             .sorted { $0.updatedAt > $1.updatedAt }
             .prefix(30)
             .map(TopicPayload.init)
+    }
+}
+
+private struct CognitionIdentityPayload: Codable {
+    var id: String
+    var name: String
+    var purpose: String
+    var summary: String
+
+    init(project: ProjectRecord) {
+        id = project.id
+        name = project.name
+        purpose = boundedText(project.context.purpose, limit: 2_000)
+        summary = boundedText(project.summary, limit: 4_000)
+    }
+}
+
+private struct CognitionDraftProjectPayload: Codable {
+    var identity: CognitionIdentityPayload
+
+    init(project: ProjectRecord) {
+        identity = CognitionIdentityPayload(project: project)
+    }
+}
+
+private struct StewardCognitionPayload: Codable {
+    var state: ProjectCognitionState
+    var version: Int
+    var sections: [ProjectCognitionSection]
+    var pendingRevisions: [PendingCognitionRevisionPayload]
+
+    init(document: ProjectCognitionDocument) {
+        state = document.state
+        version = document.version
+        sections = document.sections
+        pendingRevisions = document.revisions
+            .filter { $0.status == .pending }
+            .map(PendingCognitionRevisionPayload.init)
+    }
+}
+
+private struct PendingCognitionRevisionPayload: Codable {
+    var id: String
+    var operation: ProjectCognitionRevisionOperation
+    var status: ProjectCognitionRevisionStatus
+    var baseVersion: Int
+    var touchedSectionIDs: [String]
+    var rationale: String
+    var sourceIDs: [String]
+
+    init(revision: ProjectCognitionRevision) {
+        id = revision.id
+        operation = revision.operation
+        status = revision.status
+        baseVersion = revision.baseVersion
+        touchedSectionIDs = Array(
+            Set(revision.beforeSections.map(\.id) + revision.afterSections.map(\.id))
+        ).sorted()
+        rationale = boundedText(revision.rationale, limit: 1_000)
+        sourceIDs = revision.sourceIDs
     }
 }
 

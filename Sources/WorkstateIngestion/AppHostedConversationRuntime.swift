@@ -2,7 +2,7 @@ import Foundation
 import WorkstateCore
 
 public final class AppHostedConversationRuntime: @unchecked Sendable {
-    private let coordinator: ConversationBatchCoordinator
+    private var coordinator: ConversationBatchCoordinator
     private let statusRepository: RuntimeStatusRepository
     private let briefComposer: BriefCompositionService
     private let dailyBriefRunGate: DailyBriefRunGate
@@ -10,6 +10,7 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
     private let snapshotObserver: @Sendable (RuntimeSnapshot) -> Void
     private let queue = DispatchQueue(label: "com.timshu.workstate.app-observer")
     private let lock = NSLock()
+    private let statusLock = NSLock()
     private var watcher: CodexSessionWatcher?
     private var scheduledWork: DispatchWorkItem?
     private var scheduledBriefWork: DispatchWorkItem?
@@ -19,7 +20,7 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
     private var pendingPaths = Set<String>()
     private var pendingRequiresFullScan = false
     private var changeDrainScheduled = false
-    private var automaticNotBeforeByThread: [String: Date] = [:]
+    private var lifecycleGeneration: UInt64 = 0
 
     public init(
         runtimeRoot: URL = WorkstatePaths.defaultPaths().root,
@@ -55,17 +56,23 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         defer { lock.unlock() }
         guard !running else { return }
 
+        let settings = try WorkstateSettingsRepository(root: coordinator.scanner.runtimeRoot).load()
+        coordinator.policy.quietInterval = TimeInterval(settings.quietIntervalMinutes * 60)
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+
         let watcher = CodexSessionWatcher(root: coordinator.scanner.sessionsRoot) { [weak self] batch in
-            self?.enqueue(batch)
+            self?.enqueue(batch, generation: generation)
         }
         try watcher.start()
         self.watcher = watcher
         running = true
         queue.async { [weak self] in
-            self?.establishBaseline()
-            self?.scheduleSourcePoll()
-            self?.scheduleReconciliation()
-            self?.scheduleDailyBrief()
+            guard let self, self.isCurrent(generation) else { return }
+            self.establishBaseline(generation)
+            self.scheduleSourcePoll(generation: generation)
+            self.scheduleReconciliation(generation: generation)
+            self.scheduleDailyBrief(generation: generation)
         }
     }
 
@@ -74,6 +81,7 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         let watcher = self.watcher
         self.watcher = nil
         running = false
+        lifecycleGeneration &+= 1
         scheduledWork?.cancel()
         scheduledWork = nil
         scheduledBriefWork?.cancel()
@@ -85,7 +93,6 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         pendingPaths.removeAll(keepingCapacity: false)
         pendingRequiresFullScan = false
         changeDrainScheduled = false
-        automaticNotBeforeByThread.removeAll(keepingCapacity: false)
         lock.unlock()
         watcher?.stop()
         coordinator.orchestrator.runtime.cancelActiveProcess()
@@ -103,8 +110,13 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         projectID: String? = nil,
         completion: (@Sendable (Result<ConversationBatchRunResult?, Error>) -> Void)? = nil
     ) {
+        let generation = currentGeneration()
         queue.async { [weak self] in
             guard let self else { return }
+            guard self.isCurrent(generation) else {
+                completion?(.failure(AppHostedConversationRuntimeError.stopped))
+                return
+            }
             autoreleasepool {
                 do {
                     self.cancelScheduledWork()
@@ -115,10 +127,14 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
                         trigger: trigger,
                         projectID: projectID
                     )
-                    try self.writeStatus(for: result)
+                    try self.writeStatus(for: result, generation: generation)
                     completion?(.success(result))
                 } catch {
-                    self.publish(activity: .failed, detail: error.localizedDescription)
+                    self.publish(
+                        activity: .failed,
+                        detail: error.localizedDescription,
+                        generation: generation
+                    )
                     completion?(.failure(error))
                 }
             }
@@ -136,9 +152,9 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         }
     }
 
-    private func enqueue(_ batch: SessionChangeBatch) {
+    private func enqueue(_ batch: SessionChangeBatch, generation: UInt64) {
         lock.lock()
-        guard running else {
+        guard running, lifecycleGeneration == generation else {
             lock.unlock()
             return
         }
@@ -150,13 +166,13 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         }
         changeDrainScheduled = true
         lock.unlock()
-        queue.async { [weak self] in self?.drainChanges() }
+        queue.async { [weak self] in self?.drainChanges(generation) }
     }
 
-    private func drainChanges() {
+    private func drainChanges(_ generation: UInt64) {
         while true {
             lock.lock()
-            guard running else {
+            guard running, lifecycleGeneration == generation else {
                 changeDrainScheduled = false
                 pendingPaths.removeAll(keepingCapacity: false)
                 pendingRequiresFullScan = false
@@ -175,24 +191,30 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
             pendingPaths.removeAll(keepingCapacity: true)
             pendingRequiresFullScan = false
             lock.unlock()
-            handle(batch)
+            handle(batch, generation: generation)
         }
     }
 
-    private func establishBaseline() {
+    private func establishBaseline(_ generation: UInt64) {
+        guard isCurrent(generation) else { return }
         autoreleasepool {
             do {
                 _ = try coordinator.recoverInterruptedBatches()
                 try discardDisabledPeriod()
                 let activity = try coordinator.scanAll(minimumTimestamp: minimumTimestamp)
-                try schedule(for: activity)
+                try schedule(for: activity, generation: generation)
             } catch {
-                publish(activity: .failed, detail: error.localizedDescription)
+                publish(
+                    activity: .failed,
+                    detail: error.localizedDescription,
+                    generation: generation
+                )
             }
         }
     }
 
-    private func handle(_ batch: SessionChangeBatch) {
+    private func handle(_ batch: SessionChangeBatch, generation: UInt64) {
+        guard isCurrent(generation) else { return }
         autoreleasepool {
             do {
                 let activity = batch.requiresFullScan
@@ -201,35 +223,51 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
                         paths: batch.paths,
                         minimumTimestamp: minimumTimestamp
                     )
-                try schedule(for: activity)
+                try schedule(for: activity, generation: generation)
             } catch {
                 cancelScheduledWork()
-                publish(activity: .failed, detail: error.localizedDescription)
+                publish(
+                    activity: .failed,
+                    detail: error.localizedDescription,
+                    generation: generation
+                )
             }
         }
     }
 
-    private func schedule(for activity: PendingConversationActivity) throws {
+    private func schedule(
+        for activity: PendingConversationActivity,
+        generation: UInt64
+    ) throws {
+        guard isCurrent(generation) else { return }
         cancelScheduledWork()
         guard activity.pointerCount > 0 else {
-            publish(activity: .idle, detail: "正在监听 Codex 会话", pendingCount: 0)
+            publish(
+                activity: .idle,
+                detail: "正在监听 Codex 会话",
+                pendingCount: 0,
+                generation: generation
+            )
             return
         }
-        let cooldowns = automaticCooldownSnapshot()
-        guard let delay = try coordinator.nextAutomaticDelay(
-            notBeforeByThread: cooldowns
-        ) else { return }
+        guard let delay = try coordinator.nextAutomaticDelay() else { return }
         publish(
             activity: .idle,
             detail: "已记录 \(activity.pointerCount) 个新对话片段，等待会话告一段落",
-            pendingCount: activity.pointerCount
+            pendingCount: activity.pointerCount,
+            generation: generation
         )
         let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isCurrent(generation) else { return }
             autoreleasepool {
                 do {
-                    try self?.processAutomaticBatch()
+                    try self.processAutomaticBatch(generation)
                 } catch {
-                    self?.publish(activity: .failed, detail: error.localizedDescription)
+                    self.publish(
+                        activity: .failed,
+                        detail: error.localizedDescription,
+                        generation: generation
+                    )
                 }
             }
         }
@@ -237,23 +275,30 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func processAutomaticBatch() throws {
+    private func processAutomaticBatch(_ generation: UInt64) throws {
+        guard isCurrent(generation) else { return }
         _ = try coordinator.recoverInterruptedBatches()
-        publish(activity: .analyzing, detail: "正在整理新的项目上下文")
+        publish(
+            activity: .analyzing,
+            detail: "正在整理新的项目上下文",
+            generation: generation
+        )
         let result = try coordinator.processAutomaticallyIfDue()
-        try writeStatus(for: result)
+        try writeStatus(for: result, generation: generation)
     }
 
-    private func writeStatus(for result: ConversationBatchRunResult?) throws {
+    private func writeStatus(
+        for result: ConversationBatchRunResult?,
+        generation: UInt64
+    ) throws {
+        guard isCurrent(generation) else { return }
         guard let result else {
-            publish(activity: .idle, detail: "正在监听 Codex 会话")
+            publish(
+                activity: .idle,
+                detail: "正在监听 Codex 会话",
+                generation: generation
+            )
             return
-        }
-        if result.trigger == .quietPeriod || result.trigger == .safetySize {
-            lock.lock()
-            automaticNotBeforeByThread[result.threadID] = Date()
-                .addingTimeInterval(coordinator.policy.quietInterval)
-            lock.unlock()
         }
         let remaining = try coordinator.pendingActivity()
         let remainingDetail = remaining.pointerCount > 0
@@ -263,28 +308,38 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
             publish(
                 activity: .failed,
                 detail: "\(result.failedPointerCount) 条处理失败，已停止自动重试\(remainingDetail)",
-                pendingCount: remaining.pointerCount
+                pendingCount: remaining.pointerCount,
+                generation: generation
             )
         } else {
             publish(
                 activity: .idle,
                 detail: "已更新 \(result.summary.changed) 条 · 已忽略 \(result.summary.ignored) 条\(remainingDetail)",
-                pendingCount: remaining.pointerCount
+                pendingCount: remaining.pointerCount,
+                generation: generation
             )
         }
-        scheduleRemainingBatchIfNeeded(activity: remaining)
+        scheduleRemainingBatchIfNeeded(activity: remaining, generation: generation)
     }
 
-    private func scheduleRemainingBatchIfNeeded(activity: PendingConversationActivity) {
+    private func scheduleRemainingBatchIfNeeded(
+        activity: PendingConversationActivity,
+        generation: UInt64
+    ) {
+        guard isCurrent(generation) else { return }
         lock.lock()
-        let shouldSchedule = running
+        let shouldSchedule = running && lifecycleGeneration == generation
         lock.unlock()
         guard shouldSchedule else { return }
         guard activity.pointerCount > 0 else { return }
         do {
-            try schedule(for: activity)
+            try schedule(for: activity, generation: generation)
         } catch {
-            publish(activity: .failed, detail: error.localizedDescription)
+            publish(
+                activity: .failed,
+                detail: error.localizedDescription,
+                generation: generation
+            )
         }
     }
 
@@ -293,44 +348,61 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         scheduledWork = nil
     }
 
-    private func scheduleSourcePoll(interval: TimeInterval = 3) {
+    private func scheduleSourcePoll(
+        interval: TimeInterval = 3,
+        generation: UInt64
+    ) {
         scheduledSourcePollWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.isRunning else { return }
+            guard let self, self.isCurrent(generation) else { return }
             autoreleasepool {
                 do {
                     let paths = try self.coordinator.scanner.knownSessionPathsWithSizeChanges()
                     if !paths.isEmpty {
-                        self.handle(SessionChangeBatch(paths: paths))
+                        self.handle(
+                            SessionChangeBatch(paths: paths),
+                            generation: generation
+                        )
                     }
                 } catch {
-                    self.publish(activity: .failed, detail: error.localizedDescription)
+                    self.publish(
+                        activity: .failed,
+                        detail: error.localizedDescription,
+                        generation: generation
+                    )
                 }
             }
-            if self.isRunning {
-                self.scheduleSourcePoll(interval: interval)
+            if self.isCurrent(generation) {
+                self.scheduleSourcePoll(interval: interval, generation: generation)
             }
         }
         scheduledSourcePollWork = work
         queue.asyncAfter(deadline: .now() + interval, execute: work)
     }
 
-    private func scheduleReconciliation(interval: TimeInterval = 5 * 60) {
+    private func scheduleReconciliation(
+        interval: TimeInterval = 5 * 60,
+        generation: UInt64
+    ) {
         scheduledReconciliationWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.isRunning else { return }
+            guard let self, self.isCurrent(generation) else { return }
             autoreleasepool {
                 do {
                     let activity = try self.coordinator.scanAll(
                         minimumTimestamp: self.minimumTimestamp
                     )
-                    try self.schedule(for: activity)
+                    try self.schedule(for: activity, generation: generation)
                 } catch {
-                    self.publish(activity: .failed, detail: error.localizedDescription)
+                    self.publish(
+                        activity: .failed,
+                        detail: error.localizedDescription,
+                        generation: generation
+                    )
                 }
             }
-            if self.isRunning {
-                self.scheduleReconciliation(interval: interval)
+            if self.isCurrent(generation) {
+                self.scheduleReconciliation(interval: interval, generation: generation)
             }
         }
         scheduledReconciliationWork = work
@@ -343,15 +415,24 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         return running
     }
 
-    private func automaticCooldownSnapshot() -> [String: Date] {
+    private func currentGeneration() -> UInt64 {
         lock.lock()
         defer { lock.unlock() }
-        let now = Date()
-        automaticNotBeforeByThread = automaticNotBeforeByThread.filter { $0.value > now }
-        return automaticNotBeforeByThread
+        return lifecycleGeneration
     }
 
-    private func scheduleDailyBrief(now: Date = Date(), calendar: Calendar = .current) {
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return running && lifecycleGeneration == generation
+    }
+
+    private func scheduleDailyBrief(
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        generation: UInt64
+    ) {
+        guard isCurrent(generation) else { return }
         scheduledBriefWork?.cancel()
         var components = calendar.dateComponents([.year, .month, .day], from: now)
         components.hour = 9
@@ -359,7 +440,7 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
         components.second = 0
         guard let todayAtNine = calendar.date(from: components) else { return }
         if now >= todayAtNine {
-            runDailyBrief(now: now)
+            runDailyBrief(now: now, generation: generation)
         }
         guard let next = calendar.nextDate(
             after: now,
@@ -367,18 +448,18 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
             matchingPolicy: .nextTime
         ) else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.isRunning else { return }
-            self.runDailyBrief()
-            if self.isRunning {
-                self.scheduleDailyBrief()
+            guard let self, self.isCurrent(generation) else { return }
+            self.runDailyBrief(generation: generation)
+            if self.isCurrent(generation) {
+                self.scheduleDailyBrief(generation: generation)
             }
         }
         scheduledBriefWork = work
         queue.asyncAfter(deadline: .now() + max(0, next.timeIntervalSince(now)), execute: work)
     }
 
-    private func runDailyBrief(now: Date = Date()) {
-        guard isRunning else { return }
+    private func runDailyBrief(now: Date = Date(), generation: UInt64) {
+        guard isCurrent(generation) else { return }
         autoreleasepool {
             do {
                 guard try dailyBriefRunGate.beginIfNeeded(now: now) else { return }
@@ -389,7 +470,11 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
                     workspace: coordinator.orchestrator.service.snapshot()
                 )
             } catch {
-                publish(activity: .failed, detail: error.localizedDescription)
+                publish(
+                    activity: .failed,
+                    detail: error.localizedDescription,
+                    generation: generation
+                )
             }
         }
     }
@@ -397,8 +482,13 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
     private func publish(
         activity: RuntimeActivity,
         detail: String,
-        pendingCount: Int? = nil
+        pendingCount: Int? = nil,
+        generation: UInt64? = nil
     ) {
+        if let generation, !isCurrent(generation) { return }
+        statusLock.lock()
+        defer { statusLock.unlock() }
+        if let generation, !isCurrent(generation) { return }
         do {
             let bindings = try coordinator.scanner.routeBindingHistory()
             let activeSessions = try coordinator.scanner.activeSessions()
@@ -445,5 +535,13 @@ public final class AppHostedConversationRuntime: @unchecked Sendable {
     private func discardDisabledPeriod() throws {
         guard let minimumTimestamp else { return }
         _ = try coordinator.scanner.discardUnprocessed(before: minimumTimestamp)
+    }
+}
+
+private enum AppHostedConversationRuntimeError: LocalizedError {
+    case stopped
+
+    var errorDescription: String? {
+        "Workstate runtime stopped before the requested sync could begin"
     }
 }

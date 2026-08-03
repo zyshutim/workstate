@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test:persistent-owner-session": "node --test dist/project-owner-session.test.js"
   },
   "dependencies": {
     "@openai/codex": "0.144.5"
